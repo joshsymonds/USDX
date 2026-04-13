@@ -101,7 +101,8 @@ uses
   ULuaParty,
   ULuaScreenSing,
   UTime,
-  UWebcam;
+  UWebcam,
+  USoundStageAPI;
   //UVideoAcinerella;
 
 procedure Main;
@@ -192,6 +193,10 @@ begin
     Log.LogStatus('Write Ini', 'Initialization');
     Ini.Save;
 
+    // SoundStage HTTP API - start before UI so curl works from any screen
+    SoundStageServer := TSoundStageServer.Create(Ini.SoundStagePort);
+    SoundStageServer.Start;
+
     // Theme
     Theme.LoadTheme(Ini.Theme, Ini.Color);
 
@@ -279,6 +284,14 @@ begin
     // call an uninitialize routine for every initialize step
     // or at least use the corresponding Free methods
 
+    // SoundStage HTTP API - stop server first so no more commands queue
+    if Assigned(SoundStageServer) then
+    begin
+      Log.LogStatus('Stop SoundStage HTTP API', 'Finalization');
+      SoundStageServer.Free;
+      SoundStageServer := nil;
+    end;
+
     Log.LogStatus('Closing DB file', 'Finalization');
     if (DataBase <> nil) then
     begin
@@ -352,6 +365,11 @@ begin
         SDL_Delay(Delay);
 
       CountSkipTime;
+
+      // SoundStage HTTP API - drain any queued commands from handler threads
+      if Assigned(SoundStageServer) then
+        SoundStageServer.Drain;
+
       J:=1;
     end
     except

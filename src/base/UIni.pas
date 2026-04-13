@@ -152,6 +152,9 @@ type
       AVDelay:        integer;
       MicDelay:       integer;
 
+      // SoundStage HTTP API
+      SoundStagePort: integer;
+
       // Graphics
       MaxFramerate:   byte;
       MaxFramerateGet: byte;
@@ -1477,6 +1480,9 @@ begin
   AVDelay := IniFile.ReadInteger('Game', 'AVDelay', 0);
 
   MicDelay := IniFile.ReadInteger('Game', 'MicDelay', 140);
+
+  // SoundStage HTTP API port
+  SoundStagePort := IniFile.ReadInteger('Network', 'Port', 9000);
 
   // Read Users Info (Network)
   DataBase.ReadUsers;

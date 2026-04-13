@@ -183,6 +183,7 @@ uses
   UGraphic          in 'base\UGraphic.pas',
   UTexture          in 'base\UTexture.pas',
   ULanguage         in 'base\ULanguage.pas',
+  USoundStageAPI    in 'base\USoundStageAPI.pas',
   UMain             in 'base\UMain.pas',
   UDraw             in 'base\UDraw.pas',
   URecord           in 'base\URecord.pas',
