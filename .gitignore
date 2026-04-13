@@ -68,3 +68,10 @@ ppaslink.sh
 /usdx-dlls-i686.zip
 /game/*.dll
 /game/*.debug
+
+# devenv
+/.devenv/
+/.direnv/
+.envrc.local
+.baseline-warnings.txt
+/tmp-build.log
