@@ -26,7 +26,7 @@ uses
   httpdefs;
 
 type
-  TSoundStageCmdKind = (cmdNowPlaying);
+  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume);
 
   TSoundStageCmd = class
   private
@@ -76,7 +76,42 @@ var
 implementation
 
 uses
+  UDisplay,
+  UGraphic,
+  UScreenJukebox,
+  USongs,
+  UMusic,
   ULog;
+
+// Minimal JSON string escaper. Handles the JSON-required escapes plus
+// ASCII control chars; UTF-8 continuation bytes (>= 0x80) pass through
+// unchanged, producing valid JSON.
+function JsonStr(const S: UTF8String): UTF8String;
+var
+  I: Integer;
+  C: AnsiChar;
+begin
+  Result := '"';
+  for I := 1 to System.Length(S) do
+  begin
+    C := S[I];
+    case C of
+      '"':  Result := Result + '\"';
+      '\':  Result := Result + '\\';
+      #8:   Result := Result + '\b';
+      #9:   Result := Result + '\t';
+      #10:  Result := Result + '\n';
+      #12:  Result := Result + '\f';
+      #13:  Result := Result + '\r';
+    else
+      if Ord(C) < $20 then
+        Result := Result + Format('\u%.4x', [Ord(C)])
+      else
+        Result := Result + C;
+    end;
+  end;
+  Result := Result + '"';
+end;
 
 { TSoundStageCmd }
 
@@ -278,12 +313,31 @@ procedure TSoundStageServer.HandleRequest(Sender: TObject;
   var AResponse: TFPHTTPConnectionResponse);
 var
   Cmd: TSoundStageCmd;
+  Kind: TSoundStageCmdKind;
+  Timeout: Cardinal;
+  Matched: Boolean;
 begin
   AResponse.ContentType := 'application/json';
   try
+    Matched := True;
+    Timeout := 5000;
     if (ARequest.Method = 'GET') and (ARequest.URI = '/now-playing') then
+      Kind := cmdNowPlaying
+    else if (ARequest.Method = 'GET') and (ARequest.URI = '/songs') then
     begin
-      Cmd := Enqueue(cmdNowPlaying, 5000);
+      Kind := cmdSongs;
+      Timeout := 15000; // full song-list serialisation can be slow on Deck
+    end
+    else if (ARequest.Method = 'POST') and (ARequest.URI = '/pause') then
+      Kind := cmdPause
+    else if (ARequest.Method = 'POST') and (ARequest.URI = '/resume') then
+      Kind := cmdResume
+    else
+      Matched := False;
+
+    if Matched then
+    begin
+      Cmd := Enqueue(Kind, Timeout);
       try
         AResponse.Code := Cmd.ReplyStatus;
         AResponse.Content := Cmd.ReplyJSON;
@@ -303,6 +357,56 @@ begin
       AResponse.Content := '{"error":"internal"}';
     end;
   end;
+end;
+
+// JSON-locale format settings: force '.' as decimal separator so the
+// output is valid regardless of system locale.
+var
+  JsonFS: TFormatSettings;
+
+function NowPlayingJson: UTF8String;
+var
+  SongId: Integer;
+begin
+  if (Display.CurrentScreen = @ScreenJukebox) and
+     Assigned(ScreenJukebox) and
+     (Length(ScreenJukebox.JukeboxSongsList) > 0) and
+     (ScreenJukebox.CurrentSongList >= 0) and
+     (ScreenJukebox.CurrentSongList < Length(ScreenJukebox.JukeboxSongsList)) and
+     (not ScreenJukebox.FinishedMusic) then
+  begin
+    SongId := ScreenJukebox.JukeboxSongsList[ScreenJukebox.CurrentSongList];
+    if (SongId >= 0) and (SongId < Length(CatSongs.Song)) then
+    begin
+      Result := Format(
+        '{"title":%s,"artist":%s,"elapsed":%.3f,"duration":%.3f}',
+        [JsonStr(CatSongs.Song[SongId].Title),
+         JsonStr(CatSongs.Song[SongId].Artist),
+         AudioPlayback.Position, AudioPlayback.Length],
+        JsonFS);
+      Exit;
+    end;
+  end;
+  Result := 'null';
+end;
+
+function SongsJson: UTF8String;
+var
+  J: Integer;
+  First: Boolean;
+begin
+  Result := '[';
+  First := True;
+  for J := 0 to High(CatSongs.Song) do
+  begin
+    if not First then
+      Result := Result + ',';
+    First := False;
+    Result := Result + '{"id":' + IntToStr(J) +
+      ',"title":' + JsonStr(CatSongs.Song[J].Title) +
+      ',"artist":' + JsonStr(CatSongs.Song[J].Artist) + '}';
+  end;
+  Result := Result + ']';
 end;
 
 procedure TSoundStageServer.Drain;
@@ -332,16 +436,63 @@ begin
   for I := 0 to N - 1 do
   begin
     Cmd := Batch[I];
-    case Cmd.Kind of
-      cmdNowPlaying:
-        begin
-          Cmd.ReplyJSON := 'null';
-          Cmd.ReplyStatus := 200;
-        end;
+    try
+      case Cmd.Kind of
+        cmdNowPlaying:
+          begin
+            Cmd.ReplyJSON := NowPlayingJson;
+            Cmd.ReplyStatus := 200;
+          end;
+        cmdSongs:
+          begin
+            Cmd.ReplyJSON := SongsJson;
+            Cmd.ReplyStatus := 200;
+          end;
+        cmdPause:
+          begin
+            if AudioPlayback.Finished then
+            begin
+              Cmd.ReplyStatus := 409;
+              Cmd.ReplyJSON := '{"error":"not playing"}';
+            end
+            else
+            begin
+              AudioPlayback.Pause;
+              Cmd.ReplyStatus := 200;
+              Cmd.ReplyJSON := '{"status":"paused"}';
+            end;
+          end;
+        cmdResume:
+          begin
+            if AudioPlayback.Finished then
+            begin
+              Cmd.ReplyStatus := 409;
+              Cmd.ReplyJSON := '{"error":"nothing to resume"}';
+            end
+            else
+            begin
+              AudioPlayback.Play;
+              Cmd.ReplyStatus := 200;
+              Cmd.ReplyJSON := '{"status":"resumed"}';
+            end;
+          end;
+      end;
+    except
+      on E: Exception do
+      begin
+        Log.LogError('SoundStage drain handler: ' + E.Message, 'SoundStage');
+        Cmd.ReplyStatus := 500;
+        Cmd.ReplyJSON := '{"error":"internal"}';
+      end;
     end;
     Cmd.ReplyEvent.SetEvent;
     Cmd.Release;
   end;
 end;
+
+initialization
+  JsonFS := DefaultFormatSettings;
+  JsonFS.DecimalSeparator := '.';
+  JsonFS.ThousandSeparator := #0;
 
 end.
