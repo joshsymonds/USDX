@@ -75,3 +75,4 @@ ppaslink.sh
 .envrc.local
 .baseline-warnings.txt
 /tmp-build.log
+RESUME.md

@@ -3,7 +3,7 @@
 let
   runtimeLibs = with pkgs; [
     SDL2 SDL2_image
-    ffmpeg_7
+    ffmpeg_8
     sqlite freetype
     portaudio portmidi
     lua5_4
@@ -20,7 +20,7 @@ in
     # USDX required libs
     SDL2
     SDL2_image
-    ffmpeg_7
+    ffmpeg_8
     sqlite
     freetype
     portaudio
