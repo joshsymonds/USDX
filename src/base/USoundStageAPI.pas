@@ -21,6 +21,7 @@ uses
   Classes,
   SysUtils,
   SyncObjs,
+  Sockets,
   fphttpserver,
   httpdefs;
 
@@ -172,8 +173,12 @@ var
   Cmd: TSoundStageCmd;
   Pending: array of TSoundStageCmd;
   N: Integer;
+  WakeSocket: TSocket;
+  Addr: TInetSockAddr;
+  WaitMs: Integer;
 begin
   FEnabled := False;
+
   if Assigned(FServer) then
   begin
     try
@@ -183,11 +188,49 @@ begin
         Log.LogError('SoundStage HTTP API stop: ' + E.Message, 'SoundStage');
     end;
   end;
+
   if Assigned(FListener) then
   begin
-    FListener.WaitFor;
-    FreeAndNil(FListener);
+    // Active := False alone does not reliably interrupt the listener thread's
+    // blocking accept() call under FPC. Wake it by opening a loopback
+    // connection to our own port; accept() returns, Execute sees Active=False
+    // and returns, WaitFor unblocks.
+    try
+      WakeSocket := fpSocket(AF_INET, SOCK_STREAM, 0);
+      if WakeSocket >= 0 then
+      begin
+        FillChar(Addr, SizeOf(Addr), 0);
+        Addr.sin_family := AF_INET;
+        Addr.sin_port := htons(FPort);
+        Addr.sin_addr.s_addr := htonl($7F000001); // 127.0.0.1
+        fpConnect(WakeSocket, @Addr, SizeOf(Addr));
+        CloseSocket(WakeSocket);
+      end;
+    except
+      // Best-effort wake; listener may already be gone.
+    end;
+
+    // Poll for listener exit up to 2 s. If it hasn't exited by then we're
+    // stuck — detach so USDX's shutdown can still complete. Acceptable at
+    // process teardown since the kernel will reap everything on _exit.
+    WaitMs := 0;
+    while (not FListener.Finished) and (WaitMs < 2000) do
+    begin
+      Sleep(50);
+      Inc(WaitMs, 50);
+    end;
+    if FListener.Finished then
+    begin
+      FListener.WaitFor;
+      FreeAndNil(FListener);
+    end
+    else
+    begin
+      Log.LogError('SoundStage listener did not exit within 2s; detaching', 'SoundStage');
+      FListener := nil;
+    end;
   end;
+
   if Assigned(FServer) then
     FreeAndNil(FServer);
 

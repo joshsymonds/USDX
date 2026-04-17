@@ -40,6 +40,7 @@ uses
 var
   CheckMouseButton: boolean; // for checking mouse motion
   MAX_FPS: Byte; // 0 to 255 is enough
+  AppTerminating: boolean = False; // set by SIGTERM/SIGINT; checked in MainLoop
 
 
 procedure Main;
@@ -68,6 +69,7 @@ procedure MainThreadExec(Proc: TMainThreadExecProc; Data: Pointer);
 implementation
 
 uses
+  BaseUnix,
   math,
   dglOpenGL,
   UCommandLine,
@@ -104,6 +106,25 @@ uses
   UWebcam,
   USoundStageAPI;
   //UVideoAcinerella;
+
+// SIGTERM/SIGINT handler — flips AppTerminating so MainLoop exits cleanly
+// instead of waiting for the user to dismiss the SDL_QUIT confirm dialog.
+// Installed after SDL_Init (in Initialize3D) so it overrides SDL's default
+// signal-to-SDL_QUIT conversion.
+procedure SoundStageTermHandler(Sig: cint); cdecl;
+begin
+  AppTerminating := True;
+end;
+
+procedure InstallShutdownSignals;
+var
+  Act: SigActionRec;
+begin
+  FillChar(Act, SizeOf(Act), 0);
+  Act.sa_handler := SigActionHandler(@SoundStageTermHandler);
+  FpSigAction(SIGTERM, @Act, nil);
+  FpSigAction(SIGINT, @Act, nil);
+end;
 
 procedure Main;
 var
@@ -208,6 +229,10 @@ begin
 
     // Graphics
     Initialize3D(WindowTitle);
+
+    // Override SDL's SIGTERM/SIGINT handlers so external kills set
+    // AppTerminating (exit immediately) instead of opening the exit dialog.
+    InstallShutdownSignals;
 
     // Playlist Manager
     Log.LogStatus('Playlist Manager', 'Initialization');
@@ -369,6 +394,9 @@ begin
       // SoundStage HTTP API - drain any queued commands from handler threads
       if Assigned(SoundStageServer) then
         SoundStageServer.Drain;
+
+      if AppTerminating then
+        Done := True;
 
       J:=1;
     end
