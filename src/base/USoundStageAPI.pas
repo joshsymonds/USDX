@@ -86,6 +86,7 @@ uses
   UGraphic,
   UIni,
   UNote,
+  UScreenNextUp,
   UScreenScore,
   UScreenSingController,
   USongs,
@@ -511,6 +512,8 @@ procedure HandlePlayCommand(Cmd: TSoundStageCmd);
 var
   SongId: Integer;
   I: Integer;
+  NewPlayersIdx: Integer;
+  NewPlayersPlay: Integer;
 begin
   SongId := Cmd.PlaySongId;
 
@@ -536,32 +539,52 @@ begin
     Exit;
   end;
 
-  // ScreenSing and ScreenScore are lazily created by UScreenName on normal
-  // entry; at boot they're nil. Create them if we're the first path in.
-  // (The constructors set the globals via `ScreenSing := self` in Create.)
+  // ScreenSing, ScreenScore, ScreenNextUp are lazily created — at boot
+  // the globals are nil. Create them if we're the first path in.
+  // (TScreenSingController.Create sets `ScreenSing := self`; TScreenScore
+  // and TScreenNextUp need explicit assignment.)
   if not Assigned(ScreenSing) then
     TScreenSingController.Create;
   if not Assigned(ScreenScore) then
-    TScreenScore.Create;
+    ScreenScore := TScreenScore.Create;
+  if not Assigned(ScreenNextUp) then
+    ScreenNextUp := TScreenNextUp.Create;
 
-  // Prepare Sing-mode state BEFORE the screen transition fires OnShow.
-  CatSongs.Selected := SongId;
-  Ini.Players := PlayersIndexFor(Length(Cmd.PlaySingers));
-  // PlayersPlay is the *count* (distinct from Ini.Players the *index*);
-  // ScreenSing.OnShow uses it for SetLength(Player, ...). The normal UI
-  // path sets it in UScreenSong.OnShow; we must mirror that mapping.
-  if Ini.Players <= 3 then
-    PlayersPlay := Ini.Players + 1
+  NewPlayersIdx := PlayersIndexFor(Length(Cmd.PlaySingers));
+  if NewPlayersIdx <= 3 then
+    NewPlayersPlay := NewPlayersIdx + 1
   else
-    PlayersPlay := 6;
-  for I := 0 to High(Cmd.PlaySingers) do
-    if I < Length(Ini.Name) then
-      Ini.Name[I] := Cmd.PlaySingers[I];
+    NewPlayersPlay := 6;
 
-  // Screen routing. ScreenScore → direct transition for now; Component C
-  // will replace this branch with FadeTo(@ScreenNextUp) + cached state.
-  // TODO Component C: hook UScreenNextUp here.
-  Display.FadeTo(@ScreenSing);
+  if Display.CurrentScreen = @ScreenScore then
+  begin
+    // Interstitial path: cache state on ScreenNextUp, don't touch USDX
+    // globals yet — the interstitial applies them on expiry/skip so
+    // /now-playing during the countdown still reports the previous
+    // song (or null when AudioPlayback.Finished) rather than a song
+    // that hasn't started yet.
+    ScreenNextUp.PendingSongId      := SongId;
+    ScreenNextUp.PendingPlayers     := NewPlayersIdx;
+    ScreenNextUp.PendingPlayersPlay := NewPlayersPlay;
+    SetLength(ScreenNextUp.PendingNames, Length(Cmd.PlaySingers));
+    for I := 0 to High(Cmd.PlaySingers) do
+      ScreenNextUp.PendingNames[I] := Cmd.PlaySingers[I];
+    ScreenNextUp.PendingTitle  := CatSongs.Song[SongId].Title;
+    ScreenNextUp.PendingArtist := CatSongs.Song[SongId].Artist;
+    Display.FadeTo(@ScreenNextUp);
+  end
+  else
+  begin
+    // Direct Sing-mode entry: apply state immediately (PlayersPlay is the
+    // *count*; ScreenSing.OnShow reads it for SetLength(Player, ...)).
+    CatSongs.Selected := SongId;
+    Ini.Players := NewPlayersIdx;
+    PlayersPlay := NewPlayersPlay;
+    for I := 0 to High(Cmd.PlaySingers) do
+      if I < Length(Ini.Name) then
+        Ini.Name[I] := Cmd.PlaySingers[I];
+    Display.FadeTo(@ScreenSing);
+  end;
 
   Cmd.ReplyStatus := 200;
   Cmd.ReplyJSON := '{"status":"playing"}';

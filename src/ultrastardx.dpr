@@ -301,6 +301,7 @@ uses
   UScreenSingController   in 'screens\controllers\UScreenSingController.pas',
   UScreenSingView         in 'screens\views\UScreenSingView.pas',
   UScreenScore            in 'screens\UScreenScore.pas',
+  UScreenNextUp           in 'screens\UScreenNextUp.pas',
   UScreenJukebox          in 'screens\UScreenJukebox.pas',
   UScreenOptions          in 'screens\UScreenOptions.pas',
   UScreenOptionsGame      in 'screens\UScreenOptionsGame.pas',
