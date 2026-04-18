@@ -78,7 +78,7 @@ implementation
 uses
   UDisplay,
   UGraphic,
-  UScreenJukebox,
+  UScreenSingController,
   USongs,
   UMusic,
   ULog;
@@ -368,24 +368,19 @@ function NowPlayingJson: UTF8String;
 var
   SongId: Integer;
 begin
-  if (Display.CurrentScreen = @ScreenJukebox) and
-     Assigned(ScreenJukebox) and
-     (Length(ScreenJukebox.JukeboxSongsList) > 0) and
-     (ScreenJukebox.CurrentSongList >= 0) and
-     (ScreenJukebox.CurrentSongList < Length(ScreenJukebox.JukeboxSongsList)) and
-     (not ScreenJukebox.FinishedMusic) then
+  if (Display.CurrentScreen = @ScreenSing) and
+     (not AudioPlayback.Finished) and
+     (CatSongs.Selected >= 0) and
+     (CatSongs.Selected < Length(CatSongs.Song)) then
   begin
-    SongId := ScreenJukebox.JukeboxSongsList[ScreenJukebox.CurrentSongList];
-    if (SongId >= 0) and (SongId < Length(CatSongs.Song)) then
-    begin
-      Result := Format(
-        '{"title":%s,"artist":%s,"elapsed":%.3f,"duration":%.3f}',
-        [JsonStr(CatSongs.Song[SongId].Title),
-         JsonStr(CatSongs.Song[SongId].Artist),
-         AudioPlayback.Position, AudioPlayback.Length],
-        JsonFS);
-      Exit;
-    end;
+    SongId := CatSongs.Selected;
+    Result := Format(
+      '{"title":%s,"artist":%s,"elapsed":%.3f,"duration":%.3f}',
+      [JsonStr(CatSongs.Song[SongId].Title),
+       JsonStr(CatSongs.Song[SongId].Artist),
+       AudioPlayback.Position, AudioPlayback.Length],
+      JsonFS);
+    Exit;
   end;
   Result := 'null';
 end;
