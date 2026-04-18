@@ -85,6 +85,7 @@ uses
   UDisplay,
   UGraphic,
   UIni,
+  UNote,
   UScreenSingController,
   USongs,
   UMusic,
@@ -537,6 +538,13 @@ begin
   // Prepare Sing-mode state BEFORE the screen transition fires OnShow.
   CatSongs.Selected := SongId;
   Ini.Players := PlayersIndexFor(Length(Cmd.PlaySingers));
+  // PlayersPlay is the *count* (distinct from Ini.Players the *index*);
+  // ScreenSing.OnShow uses it for SetLength(Player, ...). The normal UI
+  // path sets it in UScreenSong.OnShow; we must mirror that mapping.
+  if Ini.Players <= 3 then
+    PlayersPlay := Ini.Players + 1
+  else
+    PlayersPlay := 6;
   for I := 0 to High(Cmd.PlaySingers) do
     if I < Length(Ini.Name) then
       Ini.Name[I] := Cmd.PlaySingers[I];
