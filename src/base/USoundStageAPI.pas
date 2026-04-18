@@ -86,6 +86,7 @@ uses
   UGraphic,
   UIni,
   UNote,
+  UScreenScore,
   UScreenSingController,
   USongs,
   UMusic,
@@ -534,6 +535,14 @@ begin
     Cmd.ReplyJSON := '{"error":"song in progress"}';
     Exit;
   end;
+
+  // ScreenSing and ScreenScore are lazily created by UScreenName on normal
+  // entry; at boot they're nil. Create them if we're the first path in.
+  // (The constructors set the globals via `ScreenSing := self` in Create.)
+  if not Assigned(ScreenSing) then
+    TScreenSingController.Create;
+  if not Assigned(ScreenScore) then
+    TScreenScore.Create;
 
   // Prepare Sing-mode state BEFORE the screen transition fires OnShow.
   CatSongs.Selected := SongId;
