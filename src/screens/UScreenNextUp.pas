@@ -71,6 +71,7 @@ uses
   UCommon,
   UDisplay,
   UGraphic,
+  UScreenSingController,
   USongs;
 
 const
