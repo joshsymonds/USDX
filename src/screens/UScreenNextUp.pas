@@ -23,6 +23,7 @@ interface
 {$I switches.inc}
 
 uses
+  dglOpenGL,
   sdl2,
   SysUtils,
   UIni,
@@ -134,6 +135,20 @@ var
   Elapsed: Cardinal;
   Remaining: integer;
 begin
+  // No theme integration means TMenu.DrawBG has nothing to draw, and the
+  // prior frame buffer (e.g. ScreenScore) leaks through. Paint a solid
+  // dark background explicitly in USDX's 800x600 virtual canvas.
+  glDisable(GL_TEXTURE_2D);
+  glColor4f(0.05, 0.05, 0.12, 1);
+  glBegin(GL_QUADS);
+    glVertex2f(0, 0);
+    glVertex2f(800, 0);
+    glVertex2f(800, 600);
+    glVertex2f(0, 600);
+  glEnd;
+  glEnable(GL_TEXTURE_2D);
+  glColor4f(1, 1, 1, 1); // reset color for subsequent textured draws
+
   Elapsed := SDL_GetTicks - StartTick;
   if Elapsed >= CountdownMs then
   begin
