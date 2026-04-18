@@ -23,13 +23,13 @@ interface
 {$I switches.inc}
 
 uses
-  dglOpenGL,
   sdl2,
   SysUtils,
   UIni,
   UMenu,
   UMusic,
   UNote,
+  UThemes,
   UUnicodeUtils;
 
 type
@@ -82,9 +82,14 @@ constructor TScreenNextUp.Create;
 begin
   inherited Create;
 
-  // Four hardcoded-position labels. USDX's virtual canvas is 800x600.
-  // Font 0 = default proportional, style 0 = plain, args after size are
-  // RGB 0..1.
+  // Borrow Theme.Loading for a guaranteed-working textured background.
+  // Raw GL_QUADS didn't render in our test (likely blend/matrix state
+  // from the outer fade renderer). LoadFromTheme goes through USDX's
+  // proper Draw path so the BG is certain to appear.
+  LoadFromTheme(Theme.Loading);
+
+  // Four custom labels on top. USDX's virtual canvas is 800x600.
+  // Font 0 = default proportional, style 0 = plain; RGB 0..1.
   SingersIdx   := AddText(400,  80, 0, 0, 48, 1, 1, 1, 'Up Next');
   TitleIdx     := AddText(400, 240, 0, 0, 40, 1, 1, 1, '');
   ArtistIdx    := AddText(400, 300, 0, 0, 30, 0.85, 0.85, 0.85, '');
@@ -135,20 +140,6 @@ var
   Elapsed: Cardinal;
   Remaining: integer;
 begin
-  // No theme integration means TMenu.DrawBG has nothing to draw, and the
-  // prior frame buffer (e.g. ScreenScore) leaks through. Paint a solid
-  // dark background explicitly in USDX's 800x600 virtual canvas.
-  glDisable(GL_TEXTURE_2D);
-  glColor4f(0.05, 0.05, 0.12, 1);
-  glBegin(GL_QUADS);
-    glVertex2f(0, 0);
-    glVertex2f(800, 0);
-    glVertex2f(800, 600);
-    glVertex2f(0, 600);
-  glEnd;
-  glEnable(GL_TEXTURE_2D);
-  glColor4f(1, 1, 1, 1); // reset color for subsequent textured draws
-
   Elapsed := SDL_GetTicks - StartTick;
   if Elapsed >= CountdownMs then
   begin
