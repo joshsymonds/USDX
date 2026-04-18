@@ -26,7 +26,7 @@ uses
   httpdefs;
 
 type
-  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume);
+  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdPlay);
 
   TSoundStageCmd = class
   private
@@ -36,6 +36,10 @@ type
     ReplyEvent: TEvent;
     ReplyJSON: string;
     ReplyStatus: integer;
+    // cmdPlay payload — parsed from request body on the handler thread,
+    // consumed on the main thread by the drain handler.
+    PlaySongId: integer;
+    PlaySingers: array of UTF8String;
     constructor Create(AKind: TSoundStageCmdKind);
     destructor Destroy; override;
     procedure Release;
@@ -76,12 +80,35 @@ var
 implementation
 
 uses
+  fpjson,
+  jsonparser,
   UDisplay,
   UGraphic,
+  UIni,
   UScreenSingController,
   USongs,
   UMusic,
   ULog;
+
+// Map a requested singer count to Ini.Players's index (0..4 → [1,2,3,4,6]).
+// Picks the smallest index whose value >= N; clamps to max (6 players).
+function PlayersIndexFor(N: Integer): Integer;
+var
+  I: Integer;
+begin
+  if N <= 0 then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  for I := 0 to High(IPlayersVals) do
+    if IPlayersVals[I] >= N then
+    begin
+      Result := I;
+      Exit;
+    end;
+  Result := High(IPlayersVals);
+end;
 
 // Minimal JSON string escaper. Handles the JSON-required escapes plus
 // ASCII control chars; UTF-8 continuation bytes (>= 0x80) pass through
@@ -123,6 +150,8 @@ begin
   ReplyEvent := TEvent.Create(nil, True, False, '');
   ReplyJSON := '';
   ReplyStatus := 500;
+  PlaySongId := -1;
+  SetLength(PlaySingers, 0);
 end;
 
 destructor TSoundStageCmd.Destroy;
@@ -316,9 +345,79 @@ var
   Kind: TSoundStageCmdKind;
   Timeout: Cardinal;
   Matched: Boolean;
+  JSONData: TJSONData;
+  Obj: TJSONObject;
+  SingersNode: TJSONData;
+  SingersArr: TJSONArray;
+  SingerStr: UTF8String;
+  List: TList;
+  I: Integer;
 begin
   AResponse.ContentType := 'application/json';
   try
+    // POST /play parses a body before enqueueing.
+    if (ARequest.Method = 'POST') and (ARequest.URI = '/play') then
+    begin
+      JSONData := nil;
+      try
+        try
+          JSONData := GetJSON(ARequest.Content);
+        except
+          on E: Exception do
+          begin
+            AResponse.Code := 400;
+            AResponse.Content := '{"error":"malformed json"}';
+            Exit;
+          end;
+        end;
+        if not (JSONData is TJSONObject) then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"body must be an object"}';
+          Exit;
+        end;
+        Obj := TJSONObject(JSONData);
+        Cmd := TSoundStageCmd.Create(cmdPlay);
+        Cmd.PlaySongId := Obj.Get('songId', -1);
+        // Prefer `singers` array; fall back to `singer` string.
+        SingersNode := Obj.Find('singers');
+        if Assigned(SingersNode) and (SingersNode.JSONType = jtArray) then
+        begin
+          SingersArr := TJSONArray(SingersNode);
+          SetLength(Cmd.PlaySingers, SingersArr.Count);
+          for I := 0 to SingersArr.Count - 1 do
+            Cmd.PlaySingers[I] := SingersArr.Items[I].AsString;
+        end
+        else
+        begin
+          SingerStr := Obj.Get('singer', '');
+          if SingerStr <> '' then
+          begin
+            SetLength(Cmd.PlaySingers, 1);
+            Cmd.PlaySingers[0] := SingerStr;
+          end;
+        end;
+      finally
+        if Assigned(JSONData) then JSONData.Free;
+      end;
+
+      List := FQueue.LockList;
+      try
+        List.Add(Cmd);
+      finally
+        FQueue.UnlockList;
+      end;
+      Cmd.ReplyEvent.WaitFor(10000);
+
+      try
+        AResponse.Code := Cmd.ReplyStatus;
+        AResponse.Content := Cmd.ReplyJSON;
+      finally
+        Cmd.Release;
+      end;
+      Exit;
+    end;
+
     Matched := True;
     Timeout := 5000;
     if (ARequest.Method = 'GET') and (ARequest.URI = '/now-playing') then
@@ -404,6 +503,53 @@ begin
   Result := Result + ']';
 end;
 
+// Drain-time handler for POST /play. Runs on the main thread, so direct
+// access to CatSongs/Ini/Display/ScreenSing is safe.
+procedure HandlePlayCommand(Cmd: TSoundStageCmd);
+var
+  SongId: Integer;
+  I: Integer;
+begin
+  SongId := Cmd.PlaySongId;
+
+  // Resolve songId; if out of range, ask CatSongs to rescan and retry once.
+  if (SongId < 0) or (SongId >= Length(CatSongs.Song)) then
+  begin
+    Log.LogStatus(Format('Play: songId %d not in CatSongs (len %d), refreshing',
+      [SongId, Length(CatSongs.Song)]), 'SoundStage');
+    CatSongs.Refresh;
+    if (SongId < 0) or (SongId >= Length(CatSongs.Song)) then
+    begin
+      Cmd.ReplyStatus := 404;
+      Cmd.ReplyJSON := '{"error":"song not found"}';
+      Exit;
+    end;
+  end;
+
+  // Reject mid-song — Go owns the queue; mid-ScreenSing /play is a Go bug.
+  if Display.CurrentScreen = @ScreenSing then
+  begin
+    Cmd.ReplyStatus := 409;
+    Cmd.ReplyJSON := '{"error":"song in progress"}';
+    Exit;
+  end;
+
+  // Prepare Sing-mode state BEFORE the screen transition fires OnShow.
+  CatSongs.Selected := SongId;
+  Ini.Players := PlayersIndexFor(Length(Cmd.PlaySingers));
+  for I := 0 to High(Cmd.PlaySingers) do
+    if I < Length(Ini.Name) then
+      Ini.Name[I] := Cmd.PlaySingers[I];
+
+  // Screen routing. ScreenScore → direct transition for now; Component C
+  // will replace this branch with FadeTo(@ScreenNextUp) + cached state.
+  // TODO Component C: hook UScreenNextUp here.
+  Display.FadeTo(@ScreenSing);
+
+  Cmd.ReplyStatus := 200;
+  Cmd.ReplyJSON := '{"status":"playing"}';
+end;
+
 procedure TSoundStageServer.Drain;
 var
   List: TList;
@@ -471,6 +617,8 @@ begin
               Cmd.ReplyJSON := '{"status":"resumed"}';
             end;
           end;
+        cmdPlay:
+          HandlePlayCommand(Cmd);
       end;
     except
       on E: Exception do
