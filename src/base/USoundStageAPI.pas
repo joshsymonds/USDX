@@ -516,7 +516,7 @@ var
   FileInfo: TFileInfo;
   Len: Integer;
 begin
-  SetLength(Result, 0);
+  Result := nil;
   Iter := FileSystem.FileFind(AvatarsPath.Append('*.jpg'), 0);
   while Iter.HasNext do
   begin
