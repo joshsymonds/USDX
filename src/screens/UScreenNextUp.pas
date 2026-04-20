@@ -162,11 +162,19 @@ begin
 
   // Apply cached state right before transitioning so /now-playing during
   // the handoff still reports the previous (or null) song. Player count
-  // was locked at session start and is not touched here.
+  // was locked at session start and is not touched here; only the Name
+  // slots change round-to-round. Ini.Name[] is config, Player[].Name is
+  // the runtime slot the HUD reads — both need the new requester.
   CatSongs.Selected := PendingSongId;
   Ini.Name[0] := PendingRequester;
+  if High(Player) >= 0 then
+    Player[0].Name := PendingRequester;
   if PendingIs2P then
+  begin
     Ini.Name[1] := 'Player 2';
+    if High(Player) >= 1 then
+      Player[1].Name := 'Player 2';
+  end;
 
   if not Assigned(ScreenSing) then
     TScreenSingController.Create;
