@@ -83,15 +83,20 @@ implementation
 uses
   fpjson,
   jsonparser,
+  UAvatars,
   UDisplay,
   UGraphic,
   UIni,
   UNote,
+  UPath,
+  UPathUtils,
   UScreenNextUp,
   UScreenScore,
   UScreenSingController,
+  USkins,
   USongs,
   UMusic,
+  UTexture,
   UThemes,
   ULog;
 
@@ -486,6 +491,44 @@ begin
   Result := 'null';
 end;
 
+// Loads default numbered avatars (game/avatars/1.png, 2.png, ...) for the first
+// `Count` player slots. Falls back to the NoAvatarTexture placeholder tinted
+// with the player's configured color — mirroring UScreenName.pas:381-395 so the
+// HUD always has something non-blank to render.
+procedure EnsureNoAvatarLoaded;
+var
+  J: Integer;
+begin
+  if NoAvatarTexture[1].TexNum <> 0 then Exit;
+  for J := 1 to UIni.IMaxPlayerCount do
+    NoAvatarTexture[J] := Texture.GetTexture(
+      Skin.GetTextureFileName('NoAvatar_P' + IntToStr(J)),
+      TEXTURE_TYPE_TRANSPARENT, $FFFFFF);
+end;
+
+procedure AssignDefaultAvatars(Count: Integer);
+var
+  I: Integer;
+  AvatarPath: IPath;
+  Col: TRGB;
+begin
+  for I := 1 to Count do
+  begin
+    AvatarPath := AvatarsPath.Append(Path(IntToStr(I) + '.png'));
+    if (AvatarPath <> nil) and AvatarPath.IsFile() then
+      AvatarPlayerTextures[I] := Texture.LoadTexture(AvatarPath)
+    else
+    begin
+      EnsureNoAvatarLoaded;
+      AvatarPlayerTextures[I] := NoAvatarTexture[I];
+      Col := GetPlayerColor(Ini.PlayerColor[I - 1]);
+      AvatarPlayerTextures[I].ColR := Col.R;
+      AvatarPlayerTextures[I].ColG := Col.G;
+      AvatarPlayerTextures[I].ColB := Col.B;
+    end;
+  end;
+end;
+
 function CurrentScreenName: UTF8String;
 begin
   if Display.CurrentScreen = nil then
@@ -677,6 +720,12 @@ begin
     // strings. Re-assign directly (matches the Create-time copy at
     // UScreenSingView.pas:551). Draw() pushes these into the Text[] controls
     // every frame (UScreenSingView.pas:795).
+
+    // Avatars default to numbered 1.png/2.png if present, else tinted NoAvatar.
+    // Without this, AvatarPlayerTextures[] is a zero-initialized TTexture and
+    // the HUD renders blank avatar slots. Session-locked, same as Player count.
+    AssignDefaultAvatars(PlayersPlay);
+
     Display.FadeTo(@ScreenSing);
   end;
 
