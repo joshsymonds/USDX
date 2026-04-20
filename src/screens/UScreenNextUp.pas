@@ -36,12 +36,11 @@ type
   TScreenNextUp = class(TMenu)
   public
     // Pending song state, set by POST /play handler before FadeTo.
-    PendingSongId:      integer;
-    PendingPlayers:     integer;      // Ini.Players index
-    PendingPlayersPlay: integer;      // PlayersPlay count
-    PendingNames:       array of UTF8String;
-    PendingTitle:       UTF8String;
-    PendingArtist:      UTF8String;
+    PendingSongId:     integer;
+    PendingRequester:  UTF8String;   // Player 1 name for the upcoming song
+    PendingIs2P:       boolean;      // true → session is 2-player (Player 2 is literal)
+    PendingTitle:      UTF8String;
+    PendingArtist:     UTF8String;
 
     // Text control indices
     SingersIdx:   integer;
@@ -60,7 +59,6 @@ type
   private
     procedure StartNow;
     procedure Cancel;
-    function JoinSingers: UTF8String;
   end;
 
 var
@@ -95,40 +93,29 @@ begin
   ArtistIdx    := AddText(400, 300, 0, 0, 30, 0.85, 0.85, 0.85, '');
   CountdownIdx := AddText(400, 420, 0, 0, 72, 1, 1, 1, '10');
 
-  PendingSongId      := -1;
-  PendingPlayers     := 0;
-  PendingPlayersPlay := 1;
-  SetLength(PendingNames, 0);
-  PendingTitle  := '';
-  PendingArtist := '';
-  Triggered := false;
-end;
-
-function TScreenNextUp.JoinSingers: UTF8String;
-var
-  I: integer;
-begin
-  Result := '';
-  for I := 0 to High(PendingNames) do
-  begin
-    if I > 0 then
-      Result := Result + ' & ';
-    Result := Result + PendingNames[I];
-  end;
-  if Result = '' then
-    Result := 'Next singer';
+  PendingSongId    := -1;
+  PendingRequester := '';
+  PendingIs2P      := false;
+  PendingTitle     := '';
+  PendingArtist    := '';
+  Triggered        := false;
 end;
 
 procedure TScreenNextUp.OnShow;
+var
+  SingerLabel: UTF8String;
 begin
   inherited;
   StartTick := SDL_GetTicks;
   Triggered := false;
 
-  // Populate labels from pending state. AddText returns an index into
-  // the inherited Text[] array.
+  if PendingRequester <> '' then
+    SingerLabel := PendingRequester
+  else
+    SingerLabel := 'Next singer';
+
   if (SingersIdx >= 0) and (SingersIdx < Length(Text)) then
-    Text[SingersIdx].Text := JoinSingers;
+    Text[SingersIdx].Text := SingerLabel;
   if (TitleIdx >= 0) and (TitleIdx < Length(Text)) then
     Text[TitleIdx].Text := PendingTitle;
   if (ArtistIdx >= 0) and (ArtistIdx < Length(Text)) then
@@ -169,26 +156,18 @@ begin
 end;
 
 procedure TScreenNextUp.StartNow;
-var
-  I: integer;
 begin
   if Triggered then Exit;
   Triggered := true;
 
-  // Apply the cached state to USDX globals right before transitioning.
-  // Doing it here (not in POST /play's handler) means a /now-playing
-  // poll during the countdown still reports the previous song or null,
-  // not a song that hasn't started yet.
+  // Apply cached state right before transitioning so /now-playing during
+  // the handoff still reports the previous (or null) song. Player count
+  // was locked at session start and is not touched here.
   CatSongs.Selected := PendingSongId;
-  Ini.Players       := PendingPlayers;
-  PlayersPlay       := PendingPlayersPlay;
-  for I := 0 to High(PendingNames) do
-    if I < Length(Ini.Name) then
-      Ini.Name[I] := PendingNames[I];
+  Ini.Name[0] := PendingRequester;
+  if PendingIs2P then
+    Ini.Name[1] := 'Player 2';
 
-  // ScreenSing/Score should already be instantiated (either by earlier
-  // UI traversal or by the POST /play handler that led us here), but
-  // be safe — create on demand.
   if not Assigned(ScreenSing) then
     TScreenSingController.Create;
 

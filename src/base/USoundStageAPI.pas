@@ -39,7 +39,8 @@ type
     // cmdPlay payload — parsed from request body on the handler thread,
     // consumed on the main thread by the drain handler.
     PlaySongId: integer;
-    PlaySingers: array of UTF8String;
+    PlayRequester: UTF8String;
+    PlayPlayers: integer;   // 1 or 2; -1 = omitted (only honored on first /play of session)
     constructor Create(AKind: TSoundStageCmdKind);
     destructor Destroy; override;
     procedure Release;
@@ -93,26 +94,6 @@ uses
   UMusic,
   ULog;
 
-// Map a requested singer count to Ini.Players's index (0..4 → [1,2,3,4,6]).
-// Picks the smallest index whose value >= N; clamps to max (6 players).
-function PlayersIndexFor(N: Integer): Integer;
-var
-  I: Integer;
-begin
-  if N <= 0 then
-  begin
-    Result := 0;
-    Exit;
-  end;
-  for I := 0 to High(IPlayersVals) do
-    if IPlayersVals[I] >= N then
-    begin
-      Result := I;
-      Exit;
-    end;
-  Result := High(IPlayersVals);
-end;
-
 // Minimal JSON string escaper. Handles the JSON-required escapes plus
 // ASCII control chars; UTF-8 continuation bytes (>= 0x80) pass through
 // unchanged, producing valid JSON.
@@ -154,7 +135,8 @@ begin
   ReplyJSON := '';
   ReplyStatus := 500;
   PlaySongId := -1;
-  SetLength(PlaySingers, 0);
+  PlayRequester := '';
+  PlayPlayers := -1;
 end;
 
 destructor TSoundStageCmd.Destroy;
@@ -350,11 +332,9 @@ var
   Matched: Boolean;
   JSONData: TJSONData;
   Obj: TJSONObject;
-  SingersNode: TJSONData;
-  SingersArr: TJSONArray;
-  SingerStr: UTF8String;
+  PlayersNode: TJSONData;
+  PlayersVal: Integer;
   List: TList;
-  I: Integer;
 begin
   AResponse.ContentType := 'application/json';
   try
@@ -380,26 +360,42 @@ begin
           Exit;
         end;
         Obj := TJSONObject(JSONData);
-        Cmd := TSoundStageCmd.Create(cmdPlay);
-        Cmd.PlaySongId := Obj.Get('songId', -1);
-        // Prefer `singers` array; fall back to `singer` string.
-        SingersNode := Obj.Find('singers');
-        if Assigned(SingersNode) and (SingersNode.JSONType = jtArray) then
+        // Validate before constructing Cmd — Cmd's refcount-2 lifecycle assumes
+        // it reaches the drain queue, so an early Release would leak.
+        if Assigned(Obj.Find('singer')) or Assigned(Obj.Find('singers')) then
         begin
-          SingersArr := TJSONArray(SingersNode);
-          SetLength(Cmd.PlaySingers, SingersArr.Count);
-          for I := 0 to SingersArr.Count - 1 do
-            Cmd.PlaySingers[I] := SingersArr.Items[I].AsString;
-        end
-        else
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"legacy fields removed; use requester"}';
+          Exit;
+        end;
+        if Obj.Get('requester', '') = '' then
         begin
-          SingerStr := Obj.Get('singer', '');
-          if SingerStr <> '' then
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"requester required"}';
+          Exit;
+        end;
+        PlayersVal := -1;
+        PlayersNode := Obj.Find('players');
+        if Assigned(PlayersNode) then
+        begin
+          if (PlayersNode.JSONType <> jtNumber) then
           begin
-            SetLength(Cmd.PlaySingers, 1);
-            Cmd.PlaySingers[0] := SingerStr;
+            AResponse.Code := 400;
+            AResponse.Content := '{"error":"players must be 1 or 2"}';
+            Exit;
+          end;
+          PlayersVal := PlayersNode.AsInteger;
+          if (PlayersVal <> 1) and (PlayersVal <> 2) then
+          begin
+            AResponse.Code := 400;
+            AResponse.Content := '{"error":"players must be 1 or 2"}';
+            Exit;
           end;
         end;
+        Cmd := TSoundStageCmd.Create(cmdPlay);
+        Cmd.PlaySongId := Obj.Get('songId', -1);
+        Cmd.PlayRequester := Obj.Get('requester', '');
+        Cmd.PlayPlayers := PlayersVal;
       finally
         if Assigned(JSONData) then JSONData.Free;
       end;
@@ -511,9 +507,6 @@ end;
 procedure HandlePlayCommand(Cmd: TSoundStageCmd);
 var
   SongId: Integer;
-  I: Integer;
-  NewPlayersIdx: Integer;
-  NewPlayersPlay: Integer;
 begin
   SongId := Cmd.PlaySongId;
 
@@ -550,39 +543,39 @@ begin
   if not Assigned(ScreenNextUp) then
     ScreenNextUp := TScreenNextUp.Create;
 
-  NewPlayersIdx := PlayersIndexFor(Length(Cmd.PlaySingers));
-  if NewPlayersIdx <= 3 then
-    NewPlayersPlay := NewPlayersIdx + 1
-  else
-    NewPlayersPlay := 6;
-
   if Display.CurrentScreen = @ScreenScore then
   begin
-    // Interstitial path: cache state on ScreenNextUp, don't touch USDX
-    // globals yet — the interstitial applies them on expiry/skip so
-    // /now-playing during the countdown still reports the previous
-    // song (or null when AudioPlayback.Finished) rather than a song
-    // that hasn't started yet.
-    ScreenNextUp.PendingSongId      := SongId;
-    ScreenNextUp.PendingPlayers     := NewPlayersIdx;
-    ScreenNextUp.PendingPlayersPlay := NewPlayersPlay;
-    SetLength(ScreenNextUp.PendingNames, Length(Cmd.PlaySingers));
-    for I := 0 to High(Cmd.PlaySingers) do
-      ScreenNextUp.PendingNames[I] := Cmd.PlaySingers[I];
-    ScreenNextUp.PendingTitle  := CatSongs.Song[SongId].Title;
-    ScreenNextUp.PendingArtist := CatSongs.Song[SongId].Artist;
+    // Mid-session handoff: player count is session-locked (already in
+    // Ini.Players). Only the requester changes round-to-round; Player 2 is
+    // a fixed literal, set once at session start. Cache on ScreenNextUp;
+    // StartNow applies on Enter so /now-playing during the handoff still
+    // reports the previous/null song, not the pending one.
+    ScreenNextUp.PendingSongId   := SongId;
+    ScreenNextUp.PendingRequester := Cmd.PlayRequester;
+    ScreenNextUp.PendingIs2P     := (Ini.Players = 1);  // Ini.Players is an IPlayersVals index; 1 → 2 players
+    ScreenNextUp.PendingTitle    := CatSongs.Song[SongId].Title;
+    ScreenNextUp.PendingArtist   := CatSongs.Song[SongId].Artist;
     Display.FadeTo(@ScreenNextUp);
   end
   else
   begin
-    // Direct Sing-mode entry: apply state immediately (PlayersPlay is the
-    // *count*; ScreenSing.OnShow reads it for SetLength(Player, ...)).
+    // First /play of a session (ScreenMain or similar non-Sing/non-Score):
+    // lock the player count for the remainder of the session. `players`
+    // defaults to 1 when omitted.
     CatSongs.Selected := SongId;
-    Ini.Players := NewPlayersIdx;
-    PlayersPlay := NewPlayersPlay;
-    for I := 0 to High(Cmd.PlaySingers) do
-      if I < Length(Ini.Name) then
-        Ini.Name[I] := Cmd.PlaySingers[I];
+    if Cmd.PlayPlayers = 2 then
+    begin
+      Ini.Players := 1;        // IPlayersVals[1] = 2
+      PlayersPlay := 2;
+      Ini.Name[0] := Cmd.PlayRequester;
+      Ini.Name[1] := 'Player 2';
+    end
+    else
+    begin
+      Ini.Players := 0;        // IPlayersVals[0] = 1
+      PlayersPlay := 1;
+      Ini.Name[0] := Cmd.PlayRequester;
+    end;
     Display.FadeTo(@ScreenSing);
   end;
 
