@@ -86,6 +86,7 @@ uses
   UAvatars,
   UCommon,
   UDisplay,
+  UFilesystem,
   UGraphic,
   UIni,
   UNote,
@@ -507,17 +508,55 @@ begin
       TEXTURE_TYPE_TRANSPARENT, $FFFFFF);
 end;
 
+// Enumerate portrait avatars (jpg files) in game/avatars/, excluding the
+// numbered 1-6.png placeholders the user found bland.
+function ListPortraitAvatars: TPathDynArray;
+var
+  Iter: IFileIterator;
+  FileInfo: TFileInfo;
+  Len: Integer;
+begin
+  SetLength(Result, 0);
+  Iter := FileSystem.FileFind(AvatarsPath.Append('*.jpg'), 0);
+  while Iter.HasNext do
+  begin
+    FileInfo := Iter.Next;
+    Len := Length(Result);
+    SetLength(Result, Len + 1);
+    Result[Len] := AvatarsPath.Append(FileInfo.Name);
+  end;
+end;
+
+// Pick `Count` distinct random avatars and assign them. Falls back to
+// NoAvatarTexture tinted with player color if the portrait pool is empty
+// or smaller than Count.
 procedure AssignDefaultAvatars(Count: Integer);
 var
-  I: Integer;
-  AvatarPath: IPath;
+  Portraits: TPathDynArray;
+  I, J: Integer;
+  Swap: IPath;
   Col: TRGB;
 begin
+  Portraits := ListPortraitAvatars;
+
+  // Partial Fisher-Yates: shuffle the first min(Count, Length) entries into
+  // random positions. We only need indices [0 .. Count-1] randomized.
+  for I := 0 to Count - 1 do
+  begin
+    if I >= Length(Portraits) then Break;
+    J := I + Random(Length(Portraits) - I);
+    if J <> I then
+    begin
+      Swap := Portraits[I];
+      Portraits[I] := Portraits[J];
+      Portraits[J] := Swap;
+    end;
+  end;
+
   for I := 1 to Count do
   begin
-    AvatarPath := AvatarsPath.Append(Path(IntToStr(I) + '.png'));
-    if (AvatarPath <> nil) and AvatarPath.IsFile() then
-      AvatarPlayerTextures[I] := Texture.LoadTexture(AvatarPath)
+    if I - 1 < Length(Portraits) then
+      AvatarPlayerTextures[I] := Texture.LoadTexture(Portraits[I - 1])
     else
     begin
       EnsureNoAvatarLoaded;
@@ -812,5 +851,6 @@ initialization
   JsonFS := DefaultFormatSettings;
   JsonFS.DecimalSeparator := '.';
   JsonFS.ThousandSeparator := #0;
+  Randomize;  // seed PRNG so AssignDefaultAvatars picks differently each process
 
 end.
