@@ -84,6 +84,7 @@ uses
   fpjson,
   jsonparser,
   UAvatars,
+  UCommon,
   UDisplay,
   UGraphic,
   UIni,
