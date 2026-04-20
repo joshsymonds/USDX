@@ -91,7 +91,7 @@ begin
     BgCfg.Color.R := 1.0;
     BgCfg.Color.G := 1.0;
     BgCfg.Color.B := 1.0;
-    BgCfg.Tex := '[bg-nextup].png';
+    BgCfg.Tex := 'NextUpBG';
     Background := TMenuBackgroundTexture.Create(BgCfg);
   except
     BgCfg.BGType := bgtColor;
