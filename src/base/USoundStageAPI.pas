@@ -651,30 +651,15 @@ begin
     Exit;
   end;
 
-  // ScreenSing/ScreenScore/ScreenNextUp are lazy-created at boot. Before the
-  // first Create, mirror UScreenName.pas:405-406: LoadPlayersColors populates
-  // the Color[] palette from Ini.PlayerColor[], and Theme.ThemeScoreLoad
-  // populates Theme.Score.* so TScreenScore.Create picks up the score board
-  // layout. Skipping these was the known blank-ScreenScore bug.
-  if not Assigned(ScreenSing) or not Assigned(ScreenScore) then
-  begin
-    LoadPlayersColors;
-    Theme.ThemeScoreLoad;
-  end;
-  if not Assigned(ScreenSing) then
-    TScreenSingController.Create;  // constructor self-assigns ScreenSing := self
-  if not Assigned(ScreenScore) then
-    ScreenScore := TScreenScore.Create;
-  if not Assigned(ScreenNextUp) then
-    ScreenNextUp := TScreenNextUp.Create;
-
   if Display.CurrentScreen = @ScreenScore then
   begin
     // Mid-session handoff: player count is session-locked (already in
     // Ini.Players). Only the requester changes round-to-round; Player 2 is
-    // a fixed literal, set once at session start. Cache on ScreenNextUp;
-    // StartNow applies on Enter so /now-playing during the handoff still
-    // reports the previous/null song, not the pending one.
+    // a fixed literal, set once at session start. ScreenSing already exists
+    // with the correct 2P/1P layout — cache on ScreenNextUp and let StartNow
+    // update Player[].Name + ScreenSing.PlayerNames. Avatars stay as-is.
+    if not Assigned(ScreenNextUp) then
+      ScreenNextUp := TScreenNextUp.Create;
     ScreenNextUp.PendingSongId    := SongId;
     ScreenNextUp.PendingRequester := Cmd.PlayRequester;
     ScreenNextUp.PendingIs2P      := (Ini.Players = 1);  // Ini.Players is an IPlayersVals index; 1 → 2 players
@@ -685,9 +670,12 @@ begin
   else
   begin
     // First /play of a session (ScreenMain or similar non-Sing/non-Score):
-    // lock the player count for the rest of the session and mirror the
-    // full pre-Sing ritual from UScreenName.pas so ScreenSing renders with
-    // correct names/HUD. `players` defaults to 1 when omitted.
+    // lock the player count and mirror UScreenName.pas:362-417. ScreenSing
+    // and ScreenScore must be (re)created AFTER Player/Ini/avatar state is
+    // set, because TScreenSingView.Create snapshots Player[].Name into
+    // ScreenSing.PlayerNames (UScreenSingView.pas:551) and AvatarPlayerTextures
+    // into each Static's Texture (UScreenSingView.pas:665). Updating those
+    // globals after construction doesn't propagate.
     SoundLib.PauseBgMusic;
     CatSongs.Selected := SongId;
     if Cmd.PlayPlayers = 2 then
@@ -703,29 +691,27 @@ begin
       PlayersPlay := 1;
       Ini.Name[0] := Cmd.PlayRequester;
     end;
-    // Player[] is global state the HUD reads; Ini.Name[] is config. Both must
-    // be populated. ScreenSing.OnShow also calls SetLength(Player, PlayersPlay),
-    // but assigning Name here ensures the new values survive that call.
     SetLength(Player, PlayersPlay);
     Player[0].Name  := Ini.Name[0];
     Player[0].Level := Ini.PlayerLevel[0];
-    ScreenSing.PlayerNames[1] := Player[0].Name;
     if PlayersPlay >= 2 then
     begin
       Player[1].Name  := Ini.Name[1];
       Player[1].Level := Ini.PlayerLevel[1];
-      ScreenSing.PlayerNames[2] := Player[1].Name;
     end;
-    // PlayerNames is captured once in TScreenSingView.Create from Player[].Name.
-    // That constructor ran before we knew who was singing, so it captured empty
-    // strings. Re-assign directly (matches the Create-time copy at
-    // UScreenSingView.pas:551). Draw() pushes these into the Text[] controls
-    // every frame (UScreenSingView.pas:795).
-
-    // Avatars default to numbered 1.png/2.png if present, else tinted NoAvatar.
-    // Without this, AvatarPlayerTextures[] is a zero-initialized TTexture and
-    // the HUD renders blank avatar slots. Session-locked, same as Player count.
     AssignDefaultAvatars(PlayersPlay);
+    LoadPlayersColors;
+    Theme.ThemeScoreLoad;
+
+    // (Re)create ScreenSing/ScreenScore so their constructors capture the
+    // state we just set. Safe because CurrentScreen is ScreenMain here, not
+    // either of the screens we're freeing. Mirrors UScreenName.pas:410-414.
+    if Assigned(ScreenSing)  then FreeAndNil(ScreenSing);
+    if Assigned(ScreenScore) then FreeAndNil(ScreenScore);
+    TScreenSingController.Create;   // self-assigns ScreenSing := Self
+    ScreenScore := TScreenScore.Create;
+    if not Assigned(ScreenNextUp) then
+      ScreenNextUp := TScreenNextUp.Create;
 
     Display.FadeTo(@ScreenSing);
   end;
