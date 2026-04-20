@@ -179,6 +179,12 @@ begin
   if not Assigned(ScreenSing) then
     TScreenSingController.Create;
 
+  // Keep ScreenSing.PlayerNames in sync — TScreenSingView.Create captured it
+  // once and Draw() reads it every frame (UScreenSingView.pas:551,795).
+  ScreenSing.PlayerNames[1] := Ini.Name[0];
+  if PendingIs2P then
+    ScreenSing.PlayerNames[2] := Ini.Name[1];
+
   FadeTo(@ScreenSing);
 end;
 

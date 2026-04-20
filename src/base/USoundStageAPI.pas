@@ -26,7 +26,7 @@ uses
   httpdefs;
 
 type
-  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdPlay);
+  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdPlay, cmdDebugState);
 
   TSoundStageCmd = class
   private
@@ -431,6 +431,8 @@ begin
       Kind := cmdPause
     else if (ARequest.Method = 'POST') and (ARequest.URI = '/resume') then
       Kind := cmdResume
+    else if (ARequest.Method = 'GET') and (ARequest.URI = '/debug/state') then
+      Kind := cmdDebugState
     else
       Matched := False;
 
@@ -482,6 +484,78 @@ begin
     Exit;
   end;
   Result := 'null';
+end;
+
+function CurrentScreenName: UTF8String;
+begin
+  if Display.CurrentScreen = nil then
+    Result := 'nil'
+  else if Display.CurrentScreen = @ScreenSing then
+    Result := 'ScreenSing'
+  else if Display.CurrentScreen = @ScreenScore then
+    Result := 'ScreenScore'
+  else if Display.CurrentScreen = @ScreenMain then
+    Result := 'ScreenMain'
+  else if Display.CurrentScreen = @ScreenNextUp then
+    Result := 'ScreenNextUp'
+  else
+    Result := 'other';
+end;
+
+function DebugStateJson: UTF8String;
+var
+  I: Integer;
+  First: Boolean;
+begin
+  Result := '{';
+  Result := Result + '"screen":' + JsonStr(CurrentScreenName);
+  Result := Result + ',"iniPlayers":' + IntToStr(Ini.Players);
+  Result := Result + ',"playersPlay":' + IntToStr(PlayersPlay);
+  Result := Result + ',"audioFinished":' + LowerCase(BoolToStr(AudioPlayback.Finished, true));
+
+  Result := Result + ',"iniName":[';
+  First := True;
+  for I := 0 to High(Ini.Name) do
+  begin
+    if not First then Result := Result + ',';
+    First := False;
+    Result := Result + JsonStr(Ini.Name[I]);
+  end;
+  Result := Result + ']';
+
+  Result := Result + ',"player":[';
+  First := True;
+  for I := 0 to High(Player) do
+  begin
+    if not First then Result := Result + ',';
+    First := False;
+    Result := Result + '{"name":' + JsonStr(Player[I].Name) +
+                       ',"level":' + IntToStr(Player[I].Level) + '}';
+  end;
+  Result := Result + ']';
+
+  Result := Result + ',"screenSingPlayerNames":[';
+  First := True;
+  if Assigned(ScreenSing) then
+  begin
+    for I := 1 to High(ScreenSing.PlayerNames) do
+    begin
+      if not First then Result := Result + ',';
+      First := False;
+      Result := Result + JsonStr(ScreenSing.PlayerNames[I]);
+    end;
+  end;
+  Result := Result + ']';
+
+  Result := Result + ',"currentSong":';
+  if (CatSongs.Selected >= 0) and (CatSongs.Selected < Length(CatSongs.Song)) then
+    Result := Result + '{"id":' + IntToStr(CatSongs.Selected) +
+                       ',"title":' + JsonStr(CatSongs.Song[CatSongs.Selected].Title) +
+                       ',"artist":' + JsonStr(CatSongs.Song[CatSongs.Selected].Artist) + '}'
+  else
+    Result := Result + 'null';
+
+  Result := Result + '}';
 end;
 
 function SongsJson: UTF8String;
@@ -591,11 +665,18 @@ begin
     SetLength(Player, PlayersPlay);
     Player[0].Name  := Ini.Name[0];
     Player[0].Level := Ini.PlayerLevel[0];
+    ScreenSing.PlayerNames[1] := Player[0].Name;
     if PlayersPlay >= 2 then
     begin
       Player[1].Name  := Ini.Name[1];
       Player[1].Level := Ini.PlayerLevel[1];
+      ScreenSing.PlayerNames[2] := Player[1].Name;
     end;
+    // PlayerNames is captured once in TScreenSingView.Create from Player[].Name.
+    // That constructor ran before we knew who was singing, so it captured empty
+    // strings. Re-assign directly (matches the Create-time copy at
+    // UScreenSingView.pas:551). Draw() pushes these into the Text[] controls
+    // every frame (UScreenSingView.pas:795).
     Display.FadeTo(@ScreenSing);
   end;
 
@@ -672,6 +753,11 @@ begin
           end;
         cmdPlay:
           HandlePlayCommand(Cmd);
+        cmdDebugState:
+          begin
+            Cmd.ReplyJSON := DebugStateJson;
+            Cmd.ReplyStatus := 200;
+          end;
       end;
     except
       on E: Exception do
