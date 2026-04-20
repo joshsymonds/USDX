@@ -70,17 +70,28 @@ uses
   UCommon,
   UDisplay,
   UGraphic,
+  UMenuBackgroundColor,
   UScreenSingController,
   USongs;
 
 constructor TScreenNextUp.Create;
+var
+  BgCfg: TThemeBackground;
 begin
   inherited Create;
 
-  // Theme.Loading gives us a guaranteed-working textured background via the
-  // normal Draw path. Raw glBegin/glVertex2f didn't render (blend/matrix
-  // state from the outer fade renderer interferes).
-  LoadFromTheme(Theme.Loading);
+  // Neutral dark background via glClearColor. We avoid LoadFromTheme here —
+  // Loading's art is disorienting, and we don't want to re-use another
+  // screen's busy background either. A plain color is the right level of
+  // restraint for a handoff/waiting screen. Raw glBegin didn't render (outer
+  // fade renderer's blend/matrix state), so we use USDX's own
+  // TMenuBackgroundColor which wraps glClearColor.
+  BgCfg.BGType := bgtColor;
+  BgCfg.Color.R := 0.08;
+  BgCfg.Color.G := 0.08;
+  BgCfg.Color.B := 0.10;
+  BgCfg.Tex := '';
+  Background := TMenuBackgroundColor.Create(BgCfg);
 
   // Virtual canvas is 800x600. Font 0 = default proportional, style 0 = plain.
   HeaderIdx  := AddText(400,  80, 0, 0, 48, 1,    1,    1,    'Up Next');
