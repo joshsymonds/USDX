@@ -2,14 +2,15 @@
  *
  * Displayed between songs when SoundStage's Go server dispatches the
  * next queued singer via POST /play while USDX is on ScreenScore.
- * Shows upcoming singer name(s), song title, artist, and a 10-second
- * countdown. On expiry, auto-transitions to ScreenSing with the cached
- * song state. Enter/Space skips countdown; Esc cancels to ScreenMain.
+ * Holds on screen indefinitely — Enter/Space applies the cached song
+ * state and transitions to ScreenSing; Esc/Backspace cancels to
+ * ScreenMain, ending the session. The indefinite hold is the whole
+ * point: the real-life singers negotiate who takes the Player 2 slot.
  *
- * Pending* fields are populated by the POST /play drain handler BEFORE
- * FadeTo(@ScreenNextUp) is called. State is only applied when the
- * interstitial actually expires, so a /now-playing poll during the
- * countdown sees consistent "just finished" data (not the new song).
+ * Pending* fields are populated by POST /play's drain handler BEFORE
+ * FadeTo(@ScreenNextUp). State is applied in StartNow (on Enter), so
+ * /now-playing during the handoff still reports the previous song
+ * (or null when AudioPlayback.Finished).
  *}
 
 unit UScreenNextUp;
@@ -36,25 +37,24 @@ type
   TScreenNextUp = class(TMenu)
   public
     // Pending song state, set by POST /play handler before FadeTo.
-    PendingSongId:     integer;
-    PendingRequester:  UTF8String;   // Player 1 name for the upcoming song
-    PendingIs2P:       boolean;      // true → session is 2-player (Player 2 is literal)
-    PendingTitle:      UTF8String;
-    PendingArtist:     UTF8String;
+    PendingSongId:    integer;
+    PendingRequester: UTF8String;   // Player 1 name for the upcoming song
+    PendingIs2P:      boolean;      // true → session is 2-player
+    PendingTitle:     UTF8String;
+    PendingArtist:    UTF8String;
 
     // Text control indices
-    SingersIdx:   integer;
-    TitleIdx:     integer;
-    ArtistIdx:    integer;
-    CountdownIdx: integer;
+    HeaderIdx:  integer;
+    TitleIdx:   integer;
+    ArtistIdx:  integer;
+    Player1Idx: integer;
+    Player2Idx: integer;
+    PromptIdx:  integer;
 
-    // Timer
-    StartTick:  Cardinal;
-    Triggered:  boolean;   // guard: only StartNow once
+    Applied: boolean;   // StartNow idempotence guard across fade frames
 
     constructor Create; override;
     procedure OnShow; override;
-    function Draw: boolean; override;
     function ParseInput(PressedKey: cardinal; CharCode: UCS4Char; PressedDown: boolean): boolean; override;
   private
     procedure StartNow;
@@ -73,74 +73,52 @@ uses
   UScreenSingController,
   USongs;
 
-const
-  CountdownMs = 10000;
-
 constructor TScreenNextUp.Create;
 begin
   inherited Create;
 
-  // Borrow Theme.Loading for a guaranteed-working textured background.
-  // Raw GL_QUADS didn't render in our test (likely blend/matrix state
-  // from the outer fade renderer). LoadFromTheme goes through USDX's
-  // proper Draw path so the BG is certain to appear.
+  // Theme.Loading gives us a guaranteed-working textured background via the
+  // normal Draw path. Raw glBegin/glVertex2f didn't render (blend/matrix
+  // state from the outer fade renderer interferes).
   LoadFromTheme(Theme.Loading);
 
-  // Four custom labels on top. USDX's virtual canvas is 800x600.
-  // Font 0 = default proportional, style 0 = plain; RGB 0..1.
-  SingersIdx   := AddText(400,  80, 0, 0, 48, 1, 1, 1, 'Up Next');
-  TitleIdx     := AddText(400, 240, 0, 0, 40, 1, 1, 1, '');
-  ArtistIdx    := AddText(400, 300, 0, 0, 30, 0.85, 0.85, 0.85, '');
-  CountdownIdx := AddText(400, 420, 0, 0, 72, 1, 1, 1, '10');
+  // Virtual canvas is 800x600. Font 0 = default proportional, style 0 = plain.
+  HeaderIdx  := AddText(400,  80, 0, 0, 48, 1,    1,    1,    'Up Next');
+  TitleIdx   := AddText(400, 200, 0, 0, 40, 1,    1,    1,    '');
+  ArtistIdx  := AddText(400, 260, 0, 0, 30, 0.85, 0.85, 0.85, '');
+  Player1Idx := AddText(400, 360, 0, 0, 36, 1,    1,    1,    '');
+  Player2Idx := AddText(400, 410, 0, 0, 36, 1,    1,    1,    '');
+  PromptIdx  := AddText(400, 520, 0, 0, 24, 0.7,  0.7,  0.7,  'Press Enter to start');
 
   PendingSongId    := -1;
   PendingRequester := '';
   PendingIs2P      := false;
   PendingTitle     := '';
   PendingArtist    := '';
-  Triggered        := false;
+  Applied          := false;
 end;
 
 procedure TScreenNextUp.OnShow;
 var
-  SingerLabel: UTF8String;
+  RequesterLabel: UTF8String;
 begin
   inherited;
-  StartTick := SDL_GetTicks;
-  Triggered := false;
+  Applied := false;
 
   if PendingRequester <> '' then
-    SingerLabel := PendingRequester
+    RequesterLabel := PendingRequester
   else
-    SingerLabel := 'Next singer';
+    RequesterLabel := 'Next singer';
 
-  if (SingersIdx >= 0) and (SingersIdx < Length(Text)) then
-    Text[SingersIdx].Text := SingerLabel;
-  if (TitleIdx >= 0) and (TitleIdx < Length(Text)) then
-    Text[TitleIdx].Text := PendingTitle;
-  if (ArtistIdx >= 0) and (ArtistIdx < Length(Text)) then
-    Text[ArtistIdx].Text := PendingArtist;
-end;
+  Text[TitleIdx].Text   := PendingTitle;
+  Text[ArtistIdx].Text  := PendingArtist;
+  Text[Player1Idx].Text := 'Player 1: ' + RequesterLabel;
 
-function TScreenNextUp.Draw: boolean;
-var
-  Elapsed: Cardinal;
-  Remaining: integer;
-begin
-  Elapsed := SDL_GetTicks - StartTick;
-  if Elapsed >= CountdownMs then
-  begin
-    Remaining := 0;
-    if not Triggered then
-      StartNow;
-  end
-  else
-    Remaining := (CountdownMs - Elapsed + 999) div 1000;
-
-  if (CountdownIdx >= 0) and (CountdownIdx < Length(Text)) then
-    Text[CountdownIdx].Text := IntToStr(Remaining);
-
-  Result := inherited Draw;
+  // Hide Player 2 row when the session is 1-player — the epic only shows it
+  // in 2P mode where the literal "Player 2" slot exists.
+  Text[Player2Idx].Visible := PendingIs2P;
+  if PendingIs2P then
+    Text[Player2Idx].Text := 'Player 2: Player 2';
 end;
 
 function TScreenNextUp.ParseInput(PressedKey: cardinal; CharCode: UCS4Char; PressedDown: boolean): boolean;
@@ -157,14 +135,14 @@ end;
 
 procedure TScreenNextUp.StartNow;
 begin
-  if Triggered then Exit;
-  Triggered := true;
+  if Applied then Exit;
+  Applied := true;
 
-  // Apply cached state right before transitioning so /now-playing during
-  // the handoff still reports the previous (or null) song. Player count
-  // was locked at session start and is not touched here; only the Name
-  // slots change round-to-round. Ini.Name[] is config, Player[].Name is
-  // the runtime slot the HUD reads — both need the new requester.
+  // Apply cached state right before transitioning so /now-playing during the
+  // handoff still reports the previous (or null) song. Player count was locked
+  // at session start and is not touched here — only the Name slots change
+  // round-to-round. Ini.Name[] is config, Player[].Name is runtime, and
+  // ScreenSing.PlayerNames[] is the HUD snapshot (UScreenSingView.pas:551).
   CatSongs.Selected := PendingSongId;
   Ini.Name[0] := PendingRequester;
   if High(Player) >= 0 then
@@ -179,8 +157,6 @@ begin
   if not Assigned(ScreenSing) then
     TScreenSingController.Create;
 
-  // Keep ScreenSing.PlayerNames in sync — TScreenSingView.Create captured it
-  // once and Draw() reads it every frame (UScreenSingView.pas:551,795).
   ScreenSing.PlayerNames[1] := Ini.Name[0];
   if PendingIs2P then
     ScreenSing.PlayerNames[2] := Ini.Name[1];
@@ -190,7 +166,7 @@ end;
 
 procedure TScreenNextUp.Cancel;
 begin
-  Triggered := true;
+  Applied := true;
   FadeTo(@ScreenMain);
 end;
 
