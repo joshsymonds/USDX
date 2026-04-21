@@ -112,6 +112,11 @@ begin
   inherited;
   Applied := false;
 
+  // If we're arriving from ScreenMain (pull path), its BG music is still
+  // running on a separate AudioPlayback stream. From ScreenScore (push path)
+  // it's already paused. PauseBgMusic is idempotent, so call unconditionally.
+  SoundLib.PauseBgMusic;
+
   if QueuedSong.Active and (QueuedSong.Requester <> '') then
     RequesterLabel := QueuedSong.Requester
   else
