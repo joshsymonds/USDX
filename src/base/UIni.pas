@@ -152,6 +152,9 @@ type
       AVDelay:        integer;
       MicDelay:       integer;
 
+      // SoundStage HTTP API
+      SoundStagePort: integer;
+
       // Graphics
       MaxFramerate:   byte;
       MaxFramerateGet: byte;
@@ -1477,6 +1480,15 @@ begin
   AVDelay := IniFile.ReadInteger('Game', 'AVDelay', 0);
 
   MicDelay := IniFile.ReadInteger('Game', 'MicDelay', 140);
+
+  // SoundStage HTTP API — port is clamped to a valid unprivileged range;
+  // out-of-range values log a warning and fall back to the default.
+  SoundStagePort := IniFile.ReadInteger('SoundStage', 'Port', 9000);
+  if (SoundStagePort < 1024) or (SoundStagePort > 65535) then
+  begin
+    Log.LogWarn(Format('SoundStagePort %d out of range [1024,65535]; using 9000', [SoundStagePort]), 'UIni');
+    SoundStagePort := 9000;
+  end;
 
   // Read Users Info (Network)
   DataBase.ReadUsers;

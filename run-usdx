@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Wrapper for Steam non-Steam-game shortcut on the Steam Deck.
+#
+# USDX is built inside the `usdx-build` distrobox Arch container and linked
+# against its /usr/lib (SDL2_image 2.8, ffmpeg 8, portmidi 2, lua 5.5, ...).
+# Host SteamOS has different versions, so running the binary directly from
+# the host fails with "cannot open shared object file".
+#
+# This script is what you point the Steam shortcut's Target at. It re-enters
+# the container and launches the real binary there. Distrobox passes DISPLAY,
+# WAYLAND_DISPLAY, and XDG_RUNTIME_DIR through, so Steam's gamescope session
+# still receives the window.
+#
+# Using `exec` everywhere preserves Steam's process-tracking — when you stop
+# the game in Steam, SIGTERM propagates to USDX, which exits via the
+# graceful-shutdown path (Component #1).
+
+set -euo pipefail
+
+# Steam injects LD_PRELOAD for its overlay; those paths don't exist inside
+# the Arch container, so clear it before handing off.
+unset LD_PRELOAD
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+GAME_DIR="${REPO_DIR}/game"
+
+exec distrobox enter usdx-build -- bash -c "cd '${GAME_DIR}' && exec ./ultrastardx"

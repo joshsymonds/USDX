@@ -40,6 +40,7 @@ uses
 var
   CheckMouseButton: boolean; // for checking mouse motion
   MAX_FPS: Byte; // 0 to 255 is enough
+  AppTerminating: boolean = False; // set by SIGTERM/SIGINT; checked in MainLoop
 
 
 procedure Main;
@@ -68,6 +69,7 @@ procedure MainThreadExec(Proc: TMainThreadExecProc; Data: Pointer);
 implementation
 
 uses
+  {$IFDEF UNIX}BaseUnix,{$ENDIF}
   math,
   dglOpenGL,
   UCommandLine,
@@ -101,8 +103,35 @@ uses
   ULuaParty,
   ULuaScreenSing,
   UTime,
-  UWebcam;
+  UWebcam,
+  USoundStageAPI;
   //UVideoAcinerella;
+
+// SIGTERM/SIGINT handler — flips AppTerminating so MainLoop exits cleanly
+// instead of waiting for the user to dismiss the SDL_QUIT confirm dialog.
+// Unix-only; on Windows we rely on SDL_QUIT for Ctrl-C. Stubbed to a no-op
+// everywhere else so the unit still compiles cross-platform (upstream merge).
+{$IFDEF UNIX}
+procedure SoundStageTermHandler(Sig: cint); cdecl;
+begin
+  AppTerminating := True;
+end;
+
+procedure InstallShutdownSignals;
+var
+  Act: SigActionRec;
+begin
+  FillChar(Act, SizeOf(Act), 0);
+  Act.sa_handler := SigActionHandler(@SoundStageTermHandler);
+  FpSigAction(SIGTERM, @Act, nil);
+  FpSigAction(SIGINT, @Act, nil);
+end;
+{$ELSE}
+procedure InstallShutdownSignals;
+begin
+  // no-op — Windows SDL2 handles Ctrl-C via SDL_QUIT
+end;
+{$ENDIF}
 
 procedure Main;
 var
@@ -192,6 +221,10 @@ begin
     Log.LogStatus('Write Ini', 'Initialization');
     Ini.Save;
 
+    // SoundStage HTTP API - start before UI so curl works from any screen
+    SoundStageServer := TSoundStageServer.Create(Ini.SoundStagePort);
+    SoundStageServer.Start;
+
     // Theme
     Theme.LoadTheme(Ini.Theme, Ini.Color);
 
@@ -203,6 +236,10 @@ begin
 
     // Graphics
     Initialize3D(WindowTitle);
+
+    // Override SDL's SIGTERM/SIGINT handlers so external kills set
+    // AppTerminating (exit immediately) instead of opening the exit dialog.
+    InstallShutdownSignals;
 
     // Playlist Manager
     Log.LogStatus('Playlist Manager', 'Initialization');
@@ -279,6 +316,14 @@ begin
     // call an uninitialize routine for every initialize step
     // or at least use the corresponding Free methods
 
+    // SoundStage HTTP API - stop server first so no more commands queue
+    if Assigned(SoundStageServer) then
+    begin
+      Log.LogStatus('Stop SoundStage HTTP API', 'Finalization');
+      SoundStageServer.Free;
+      SoundStageServer := nil;
+    end;
+
     Log.LogStatus('Closing DB file', 'Finalization');
     if (DataBase <> nil) then
     begin
@@ -352,6 +397,14 @@ begin
         SDL_Delay(Delay);
 
       CountSkipTime;
+
+      // SoundStage HTTP API - drain any queued commands from handler threads
+      if Assigned(SoundStageServer) then
+        SoundStageServer.Drain;
+
+      if AppTerminating then
+        Done := True;
+
       J:=1;
     end
     except
