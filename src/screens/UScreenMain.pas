@@ -91,8 +91,8 @@ uses
 function TrySingFromQueue: boolean;
 begin
   Result := QueuedSong.Active;
-  if Result and not Assigned(ScreenNextUp) then
-    ScreenNextUp := TScreenNextUp.Create;
+  if Result then
+    EnsureScreenNextUp;
 end;
 
 function TScreenMain.ParseInput(PressedKey: Cardinal; CharCode: UCS4Char;

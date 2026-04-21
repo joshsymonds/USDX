@@ -37,6 +37,11 @@ uses
   UThemes,
   UUnicodeUtils;
 
+// Lazy-creates ScreenNextUp. Single entry point used by both the HTTP /play
+// drain handler (USoundStageAPI.HandlePlayCommand) and the ScreenMain Sing
+// button intercept (UScreenMain.TrySingFromQueue).
+procedure EnsureScreenNextUp;
+
 type
   TScreenNextUp = class(TMenu)
   public
@@ -69,6 +74,8 @@ uses
   UDisplay,
   UFilesystem,
   UGraphic,
+  ULog,
+  UMenuBackground,
   UMenuBackgroundColor,
   UMenuBackgroundTexture,
   UPath,
@@ -79,6 +86,12 @@ uses
   USongs,
   USoundStageAPI,
   UTexture;
+
+procedure EnsureScreenNextUp;
+begin
+  if not Assigned(ScreenNextUp) then
+    ScreenNextUp := TScreenNextUp.Create;
+end;
 
 // --- Default-avatar helpers (moved from USoundStageAPI; only needed here) ---
 
@@ -171,12 +184,17 @@ begin
     BgCfg.Tex := 'NextUpBG';
     Background := TMenuBackgroundTexture.Create(BgCfg);
   except
-    BgCfg.BGType := bgtColor;
-    BgCfg.Color.R := 0.08;
-    BgCfg.Color.G := 0.08;
-    BgCfg.Color.B := 0.10;
-    BgCfg.Tex := '';
-    Background := TMenuBackgroundColor.Create(BgCfg);
+    // Narrow catch to the specific texture-load failure. Any other exception
+    // (AV, out-of-memory, file-system error) surfaces via the default handler.
+    on E: EMenuBackgroundError do
+    begin
+      BgCfg.BGType := bgtColor;
+      BgCfg.Color.R := 0.08;
+      BgCfg.Color.G := 0.08;
+      BgCfg.Color.B := 0.10;
+      BgCfg.Tex := '';
+      Background := TMenuBackgroundColor.Create(BgCfg);
+    end;
   end;
 
   HeaderIdx  := AddText(400,  80, 0, 0, 48, 1,    1,    1,    'Up Next');
@@ -196,11 +214,21 @@ begin
   inherited;
   Applied := false;
 
+  // Defensive bail: in the documented flow we're never shown with an empty
+  // queue (ScreenMain pull gates on Active, ScreenScore push writes first),
+  // but if some future path ever lands here empty, bounce back rather than
+  // rendering a blank "Player 1: Next singer" screen.
+  if not QueuedSong.Active then
+  begin
+    FadeTo(@ScreenMain);
+    Exit;
+  end;
+
   // Pull path from ScreenMain leaves BG music running; push path from Score
   // has it paused already. PauseBgMusic is idempotent.
   SoundLib.PauseBgMusic;
 
-  if QueuedSong.Active and (QueuedSong.Requester <> '') then
+  if QueuedSong.Requester <> '' then
     RequesterLabel := QueuedSong.Requester
   else
     RequesterLabel := 'Next singer';
@@ -209,7 +237,7 @@ begin
   Text[ArtistIdx].Text  := QueuedSong.Artist;
   Text[Player1Idx].Text := 'Player 1: ' + RequesterLabel;
 
-  Text[Player2Idx].Visible := QueuedSong.Active and QueuedSong.Is2P;
+  Text[Player2Idx].Visible := QueuedSong.Is2P;
   if QueuedSong.Is2P then
     Text[Player2Idx].Text := 'Player 2: Player 2';
 end;
@@ -233,6 +261,23 @@ begin
   if Applied then Exit;
   Applied := true;
   if not QueuedSong.Active then Exit;
+
+  // Bounds-check the cached SongId in case CatSongs was refreshed (or the
+  // song file deleted) between stage time and now. One retry via
+  // CatSongs.Refresh mirrors HandlePlayCommand's resolve logic — if still
+  // out of range, drop the stale queue and bail to main menu.
+  if (QueuedSong.SongId < 0) or (QueuedSong.SongId >= Length(CatSongs.Song)) then
+  begin
+    CatSongs.Refresh;
+    if (QueuedSong.SongId < 0) or (QueuedSong.SongId >= Length(CatSongs.Song)) then
+    begin
+      Log.LogError(Format('StartNow: queued songId %d out of range (len %d), dropping',
+        [QueuedSong.SongId, Length(CatSongs.Song)]), 'SoundStage');
+      QueuedSong.Active := false;
+      FadeTo(@ScreenMain);
+      Exit;
+    end;
+  end;
 
   // Full pre-Sing ritual — mirrors UScreenName.pas:362-417. Runs regardless
   // of push/pull entry path. For mid-session 2P-stays-2P the Ini writes are

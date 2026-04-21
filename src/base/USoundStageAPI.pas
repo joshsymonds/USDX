@@ -106,34 +106,48 @@ uses
   UMusic,
   ULog;
 
-// Minimal JSON string escaper. Handles the JSON-required escapes plus
-// ASCII control chars; UTF-8 continuation bytes (>= 0x80) pass through
-// unchanged, producing valid JSON.
-function JsonStr(const S: UTF8String): UTF8String;
+// Minimal JSON string escaper. Handles JSON-required escapes plus ASCII
+// control chars; UTF-8 continuation bytes (>= 0x80) pass through unchanged,
+// producing valid JSON. Uses TStringBuilder to keep both JsonStr and the
+// SongsJson hot path out of O(N^2) concat territory.
+procedure AppendJsonStr(Sb: TStringBuilder; const S: UTF8String);
 var
   I: Integer;
   C: AnsiChar;
 begin
-  Result := '"';
+  Sb.Append('"');
   for I := 1 to System.Length(S) do
   begin
     C := S[I];
     case C of
-      '"':  Result := Result + '\"';
-      '\':  Result := Result + '\\';
-      #8:   Result := Result + '\b';
-      #9:   Result := Result + '\t';
-      #10:  Result := Result + '\n';
-      #12:  Result := Result + '\f';
-      #13:  Result := Result + '\r';
+      '"':  Sb.Append('\"');
+      '\':  Sb.Append('\\');
+      #8:   Sb.Append('\b');
+      #9:   Sb.Append('\t');
+      #10:  Sb.Append('\n');
+      #12:  Sb.Append('\f');
+      #13:  Sb.Append('\r');
     else
       if Ord(C) < $20 then
-        Result := Result + Format('\u%.4x', [Ord(C)])
+        Sb.Append(Format('\u%.4x', [Ord(C)]))
       else
-        Result := Result + C;
+        Sb.Append(C);
     end;
   end;
-  Result := Result + '"';
+  Sb.Append('"');
+end;
+
+function JsonStr(const S: UTF8String): UTF8String;
+var
+  Sb: TStringBuilder;
+begin
+  Sb := TStringBuilder.Create;
+  try
+    AppendJsonStr(Sb, S);
+    Result := Sb.ToString;
+  finally
+    Sb.Free;
+  end;
 end;
 
 { TSoundStageCmd }
@@ -144,8 +158,10 @@ begin
   FRefCount := 2;
   Kind := AKind;
   ReplyEvent := TEvent.Create(nil, True, False, '');
-  ReplyJSON := '';
-  ReplyStatus := 500;
+  // If the main thread fails to drain before WaitFor timeout, the handler
+  // thread ships these defaults — better than an empty 500 body.
+  ReplyJSON := '{"error":"timeout"}';
+  ReplyStatus := 504;
   PlaySongId := -1;
   PlayRequester := '';
   PlayPlayers := -1;
@@ -206,13 +222,21 @@ begin
   try
     FServer := TFPHTTPServer.Create(nil);
     FServer.Port := FPort;
+    if Ini.SoundStageBindAddress <> '' then
+      FServer.Address := Ini.SoundStageBindAddress;
     FServer.Threaded := True;
+    // Guard against slowloris / abandoned sockets tying up an FPHTTPServer
+    // worker forever. 30s is generous for a local LAN client.
+    FServer.ConnectionTimeout := 30;
     FServer.OnRequest := HandleRequest;
     // FServer.Active := True blocks in the accept loop — run it in a
     // dedicated listener thread so USDX's main thread can enter MainLoop.
     FListener := TSoundStageListener.Create(FServer);
     FEnabled := True;
-    Log.LogStatus(Format('SoundStage HTTP API listening on port %d', [FPort]), 'SoundStage');
+    if Ini.SoundStageBindAddress = '' then
+      Log.LogStatus(Format('SoundStage HTTP API listening on port %d (all interfaces)', [FPort]), 'SoundStage')
+    else
+      Log.LogStatus(Format('SoundStage HTTP API listening on %s:%d', [Ini.SoundStageBindAddress, FPort]), 'SoundStage');
   except
     on E: Exception do
     begin
@@ -353,6 +377,14 @@ begin
     // POST /play parses a body before enqueueing.
     if (ARequest.Method = 'POST') and (ARequest.URI = '/play') then
     begin
+      // Cap body size so a misbehaving or malicious client can't OOM USDX
+      // by posting multi-megabyte payloads. 64 KB is ample for a 3-field JSON.
+      if System.Length(ARequest.Content) > 65536 then
+      begin
+        AResponse.Code := 413;
+        AResponse.Content := '{"error":"body too large"}';
+        Exit;
+      end;
       JSONData := nil;
       try
         try
@@ -390,7 +422,9 @@ begin
         PlayersNode := Obj.Find('players');
         if Assigned(PlayersNode) then
         begin
-          if (PlayersNode.JSONType <> jtNumber) then
+          // Must be a JSON number AND an integer (reject 1.5, strings, etc.).
+          if (PlayersNode.JSONType <> jtNumber) or
+             (TJSONNumber(PlayersNode).NumberType <> ntInteger) then
           begin
             AResponse.Code := 400;
             AResponse.Content := '{"error":"players must be 1 or 2"}';
@@ -465,6 +499,7 @@ begin
   except
     on E: Exception do
     begin
+      Log.LogError('SoundStage HandleRequest: ' + E.Message, 'SoundStage');
       AResponse.Code := 500;
       AResponse.Content := '{"error":"internal"}';
     end;
@@ -581,21 +616,32 @@ end;
 
 function SongsJson: UTF8String;
 var
+  Sb: TStringBuilder;
   J: Integer;
-  First: Boolean;
 begin
-  Result := '[';
-  First := True;
-  for J := 0 to High(CatSongs.Song) do
-  begin
-    if not First then
-      Result := Result + ',';
-    First := False;
-    Result := Result + '{"id":' + IntToStr(J) +
-      ',"title":' + JsonStr(CatSongs.Song[J].Title) +
-      ',"artist":' + JsonStr(CatSongs.Song[J].Artist) + '}';
+  // Preallocate for a large library — a 2KB initial capacity on the builder
+  // avoids the first few growth reallocations. This path was O(N^2) under
+  // `Result := Result + ...` and caused a visible frame hitch on the Deck
+  // library (~900 songs); with the builder it's O(N) bytes written.
+  Sb := TStringBuilder.Create(2048);
+  try
+    Sb.Append('[');
+    for J := 0 to High(CatSongs.Song) do
+    begin
+      if J > 0 then Sb.Append(',');
+      Sb.Append('{"id":');
+      Sb.Append(IntToStr(J));
+      Sb.Append(',"title":');
+      AppendJsonStr(Sb, CatSongs.Song[J].Title);
+      Sb.Append(',"artist":');
+      AppendJsonStr(Sb, CatSongs.Song[J].Artist);
+      Sb.Append('}');
+    end;
+    Sb.Append(']');
+    Result := Sb.ToString;
+  finally
+    Sb.Free;
   end;
-  Result := Result + ']';
 end;
 
 // Drain-time handler for POST /play. Runs on the main thread, so direct
@@ -636,8 +682,7 @@ begin
   // All session-setup work (Ini.Players, SetLength(Player), avatars, theme,
   // ScreenSing/Score recreation) happens in ScreenNextUp.StartNow on Enter.
 
-  if not Assigned(ScreenNextUp) then
-    ScreenNextUp := TScreenNextUp.Create;
+  EnsureScreenNextUp;
 
   QueuedSong.Active    := true;
   QueuedSong.SongId    := SongId;

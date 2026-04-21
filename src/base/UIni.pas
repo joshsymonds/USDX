@@ -153,7 +153,8 @@ type
       MicDelay:       integer;
 
       // SoundStage HTTP API
-      SoundStagePort: integer;
+      SoundStagePort:        integer;
+      SoundStageBindAddress: string;   // empty = all interfaces; '127.0.0.1' to lock to loopback
 
       // Graphics
       MaxFramerate:   byte;
@@ -1481,8 +1482,17 @@ begin
 
   MicDelay := IniFile.ReadInteger('Game', 'MicDelay', 140);
 
-  // SoundStage HTTP API port
-  SoundStagePort := IniFile.ReadInteger('Network', 'Port', 9000);
+  // SoundStage HTTP API — port is clamped to a valid unprivileged range;
+  // out-of-range values log a warning and fall back to the default.
+  SoundStagePort := IniFile.ReadInteger('SoundStage', 'Port', 9000);
+  if (SoundStagePort < 1024) or (SoundStagePort > 65535) then
+  begin
+    Log.LogWarn(Format('SoundStagePort %d out of range [1024,65535]; using 9000', [SoundStagePort]), 'UIni');
+    SoundStagePort := 9000;
+  end;
+  // BindAddress: '' means all interfaces (typical for LAN SoundStage deployments);
+  // set '127.0.0.1' to restrict to loopback when SoundStage runs on the same host.
+  SoundStageBindAddress := IniFile.ReadString('SoundStage', 'BindAddress', '');
 
   // Read Users Info (Network)
   DataBase.ReadUsers;

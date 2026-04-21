@@ -69,7 +69,7 @@ procedure MainThreadExec(Proc: TMainThreadExecProc; Data: Pointer);
 implementation
 
 uses
-  BaseUnix,
+  {$IFDEF UNIX}BaseUnix,{$ENDIF}
   math,
   dglOpenGL,
   UCommandLine,
@@ -109,8 +109,9 @@ uses
 
 // SIGTERM/SIGINT handler — flips AppTerminating so MainLoop exits cleanly
 // instead of waiting for the user to dismiss the SDL_QUIT confirm dialog.
-// Installed after SDL_Init (in Initialize3D) so it overrides SDL's default
-// signal-to-SDL_QUIT conversion.
+// Unix-only; on Windows we rely on SDL_QUIT for Ctrl-C. Stubbed to a no-op
+// everywhere else so the unit still compiles cross-platform (upstream merge).
+{$IFDEF UNIX}
 procedure SoundStageTermHandler(Sig: cint); cdecl;
 begin
   AppTerminating := True;
@@ -125,6 +126,12 @@ begin
   FpSigAction(SIGTERM, @Act, nil);
   FpSigAction(SIGINT, @Act, nil);
 end;
+{$ELSE}
+procedure InstallShutdownSignals;
+begin
+  // no-op — Windows SDL2 handles Ctrl-C via SDL_QUIT
+end;
+{$ENDIF}
 
 procedure Main;
 var
