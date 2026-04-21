@@ -3012,6 +3012,19 @@ begin
   if (ScreenSong.Mode = smJukebox) and (Ini.PartyPopup = 1) then
     ScreenSongMenu.MenuShow(SM_Jukebox);
 
+  // Sync carousel cursor to the last-sung song. CatSongs.Selected is
+  // set by the Sing entry paths (keyboard Enter at line 4118/4130,
+  // UScreenNextUp for SoundStage-queued songs, UScreenSingController
+  // for medley chains). Without this, Interaction is stale on return
+  // from Score when the Sing entry didn't go through the carousel
+  // (i.e. every /queue-driven song).
+  if (Mode = smNormal)
+     and (CatSongs.Selected >= 0)
+     and (CatSongs.Selected <= High(CatSongs.Song))
+     and (CatSongs.Song[CatSongs.Selected].Visible)
+     and (not CatSongs.Song[CatSongs.Selected].Main) then
+    Interaction := CatSongs.Selected;
+
   isScrolling := false;
   SetJoker;
   SetStatics;
