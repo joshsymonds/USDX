@@ -97,23 +97,13 @@ implementation
 uses
   fpjson,
   jsonparser,
-  UAvatars,
-  UCommon,
   UDisplay,
-  UFilesystem,
   UGraphic,
   UIni,
   UNote,
-  UPath,
-  UPathUtils,
   UScreenNextUp,
-  UScreenScore,
-  UScreenSingController,
-  USkins,
   USongs,
   UMusic,
-  UTexture,
-  UThemes,
   ULog;
 
 // Minimal JSON string escaper. Handles the JSON-required escapes plus
@@ -507,82 +497,6 @@ begin
   Result := 'null';
 end;
 
-// Loads default numbered avatars (game/avatars/1.png, 2.png, ...) for the first
-// `Count` player slots. Falls back to the NoAvatarTexture placeholder tinted
-// with the player's configured color — mirroring UScreenName.pas:381-395 so the
-// HUD always has something non-blank to render.
-procedure EnsureNoAvatarLoaded;
-var
-  J: Integer;
-begin
-  if NoAvatarTexture[1].TexNum <> 0 then Exit;
-  for J := 1 to UIni.IMaxPlayerCount do
-    NoAvatarTexture[J] := Texture.GetTexture(
-      Skin.GetTextureFileName('NoAvatar_P' + IntToStr(J)),
-      TEXTURE_TYPE_TRANSPARENT, $FFFFFF);
-end;
-
-// Enumerate portrait avatars (jpg files) in game/avatars/, excluding the
-// numbered 1-6.png placeholders the user found bland.
-function ListPortraitAvatars: TPathDynArray;
-var
-  Iter: IFileIterator;
-  FileInfo: TFileInfo;
-  Len: Integer;
-begin
-  Result := nil;
-  Iter := FileSystem.FileFind(AvatarsPath.Append('*.jpg'), 0);
-  while Iter.HasNext do
-  begin
-    FileInfo := Iter.Next;
-    Len := Length(Result);
-    SetLength(Result, Len + 1);
-    Result[Len] := AvatarsPath.Append(FileInfo.Name);
-  end;
-end;
-
-// Pick `Count` distinct random avatars and assign them. Falls back to
-// NoAvatarTexture tinted with player color if the portrait pool is empty
-// or smaller than Count.
-procedure AssignDefaultAvatars(Count: Integer);
-var
-  Portraits: TPathDynArray;
-  I, J: Integer;
-  Swap: IPath;
-  Col: TRGB;
-begin
-  Portraits := ListPortraitAvatars;
-
-  // Partial Fisher-Yates: shuffle the first min(Count, Length) entries into
-  // random positions. We only need indices [0 .. Count-1] randomized.
-  for I := 0 to Count - 1 do
-  begin
-    if I >= Length(Portraits) then Break;
-    J := I + Random(Length(Portraits) - I);
-    if J <> I then
-    begin
-      Swap := Portraits[I];
-      Portraits[I] := Portraits[J];
-      Portraits[J] := Swap;
-    end;
-  end;
-
-  for I := 1 to Count do
-  begin
-    if I - 1 < Length(Portraits) then
-      AvatarPlayerTextures[I] := Texture.LoadTexture(Portraits[I - 1])
-    else
-    begin
-      EnsureNoAvatarLoaded;
-      AvatarPlayerTextures[I] := NoAvatarTexture[I];
-      Col := GetPlayerColor(Ini.PlayerColor[I - 1]);
-      AvatarPlayerTextures[I].ColR := Col.R;
-      AvatarPlayerTextures[I].ColG := Col.G;
-      AvatarPlayerTextures[I].ColB := Col.B;
-    end;
-  end;
-end;
-
 function CurrentScreenName: UTF8String;
 begin
   if Display.CurrentScreen = nil then
@@ -714,71 +628,29 @@ begin
     Exit;
   end;
 
+  // Pull-model queue semantics:
+  //   - Writes QueuedSong unconditionally (newest wins, staged until consumed).
+  //   - From ScreenScore: push to handoff immediately (mid-session in motion).
+  //   - From ScreenMain or any other non-Sing screen: stage only; the user
+  //     pulls via the Sing button which diverts to ScreenNextUp.
+  // All session-setup work (Ini.Players, SetLength(Player), avatars, theme,
+  // ScreenSing/Score recreation) happens in ScreenNextUp.StartNow on Enter.
+
+  if not Assigned(ScreenNextUp) then
+    ScreenNextUp := TScreenNextUp.Create;
+
+  QueuedSong.Active    := true;
+  QueuedSong.SongId    := SongId;
+  QueuedSong.Requester := Cmd.PlayRequester;
   if Display.CurrentScreen = @ScreenScore then
-  begin
-    // Mid-session handoff: player count is session-locked (already in
-    // Ini.Players). Only the requester changes round-to-round; Player 2 is
-    // a fixed literal, set once at session start. ScreenSing already exists
-    // with the correct 2P/1P layout — stage on the global QueuedSong and
-    // let StartNow apply on Enter. Avatars stay as-is.
-    if not Assigned(ScreenNextUp) then
-      ScreenNextUp := TScreenNextUp.Create;
-    QueuedSong.Active    := true;
-    QueuedSong.SongId    := SongId;
-    QueuedSong.Requester := Cmd.PlayRequester;
-    QueuedSong.Is2P      := (Ini.Players = 1);  // Ini.Players is an IPlayersVals index; 1 → 2 players
-    QueuedSong.Title     := CatSongs.Song[SongId].Title;
-    QueuedSong.Artist    := CatSongs.Song[SongId].Artist;
-    Display.FadeTo(@ScreenNextUp);
-  end
+    QueuedSong.Is2P := (Ini.Players = 1)     // session-locked — IPlayersVals[1] = 2
   else
-  begin
-    // First /play of a session (ScreenMain or similar non-Sing/non-Score):
-    // lock the player count and mirror UScreenName.pas:362-417. ScreenSing
-    // and ScreenScore must be (re)created AFTER Player/Ini/avatar state is
-    // set, because TScreenSingView.Create snapshots Player[].Name into
-    // ScreenSing.PlayerNames (UScreenSingView.pas:551) and AvatarPlayerTextures
-    // into each Static's Texture (UScreenSingView.pas:665). Updating those
-    // globals after construction doesn't propagate.
-    SoundLib.PauseBgMusic;
-    CatSongs.Selected := SongId;
-    if Cmd.PlayPlayers = 2 then
-    begin
-      Ini.Players := 1;        // IPlayersVals[1] = 2
-      PlayersPlay := 2;
-      Ini.Name[0] := Cmd.PlayRequester;
-      Ini.Name[1] := 'Player 2';
-    end
-    else
-    begin
-      Ini.Players := 0;        // IPlayersVals[0] = 1
-      PlayersPlay := 1;
-      Ini.Name[0] := Cmd.PlayRequester;
-    end;
-    SetLength(Player, PlayersPlay);
-    Player[0].Name  := Ini.Name[0];
-    Player[0].Level := Ini.PlayerLevel[0];
-    if PlayersPlay >= 2 then
-    begin
-      Player[1].Name  := Ini.Name[1];
-      Player[1].Level := Ini.PlayerLevel[1];
-    end;
-    AssignDefaultAvatars(PlayersPlay);
-    LoadPlayersColors;
-    Theme.ThemeScoreLoad;
+    QueuedSong.Is2P := (Cmd.PlayPlayers = 2);
+  QueuedSong.Title  := CatSongs.Song[SongId].Title;
+  QueuedSong.Artist := CatSongs.Song[SongId].Artist;
 
-    // (Re)create ScreenSing/ScreenScore so their constructors capture the
-    // state we just set. Safe because CurrentScreen is ScreenMain here, not
-    // either of the screens we're freeing. Mirrors UScreenName.pas:410-414.
-    if Assigned(ScreenSing)  then FreeAndNil(ScreenSing);
-    if Assigned(ScreenScore) then FreeAndNil(ScreenScore);
-    TScreenSingController.Create;   // self-assigns ScreenSing := Self
-    ScreenScore := TScreenScore.Create;
-    if not Assigned(ScreenNextUp) then
-      ScreenNextUp := TScreenNextUp.Create;
-
-    Display.FadeTo(@ScreenSing);
-  end;
+  if Display.CurrentScreen = @ScreenScore then
+    Display.FadeTo(@ScreenNextUp);
 
   Cmd.ReplyStatus := 200;
   Cmd.ReplyJSON := '{"status":"playing"}';

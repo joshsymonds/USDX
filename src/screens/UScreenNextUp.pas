@@ -7,6 +7,12 @@
  * main-menu pull. The indefinite hold is the whole point: the real-life
  * singers negotiate who takes the Player 2 slot.
  *
+ * StartNow owns the full pre-Sing ritual (Ini.Players, SetLength(Player),
+ * Player[].Name/Level, avatar textures, LoadPlayersColors, ThemeScoreLoad,
+ * FreeAndNil+recreate ScreenSing/ScreenScore). HandlePlayCommand in the
+ * HTTP layer is just a queue-writer; the heavy lifting all lands here so
+ * both pull-from-Main and push-from-Score go through the same codepath.
+ *
  * /now-playing during the handoff still reports the previous (or null)
  * song — QueuedSong is not applied until StartNow.
  *}
@@ -58,14 +64,94 @@ var
 implementation
 
 uses
+  UAvatars,
   UCommon,
   UDisplay,
+  UFilesystem,
   UGraphic,
   UMenuBackgroundColor,
   UMenuBackgroundTexture,
+  UPath,
+  UPathUtils,
+  UScreenScore,
   UScreenSingController,
+  USkins,
   USongs,
-  USoundStageAPI;
+  USoundStageAPI,
+  UTexture;
+
+// --- Default-avatar helpers (moved from USoundStageAPI; only needed here) ---
+
+procedure EnsureNoAvatarLoaded;
+var
+  J: Integer;
+begin
+  if NoAvatarTexture[1].TexNum <> 0 then Exit;
+  for J := 1 to UIni.IMaxPlayerCount do
+    NoAvatarTexture[J] := Texture.GetTexture(
+      Skin.GetTextureFileName('NoAvatar_P' + IntToStr(J)),
+      TEXTURE_TYPE_TRANSPARENT, $FFFFFF);
+end;
+
+function ListPortraitAvatars: TPathDynArray;
+var
+  Iter: IFileIterator;
+  FileInfo: TFileInfo;
+  Len: Integer;
+begin
+  Result := nil;
+  Iter := FileSystem.FileFind(AvatarsPath.Append('*.jpg'), 0);
+  while Iter.HasNext do
+  begin
+    FileInfo := Iter.Next;
+    Len := Length(Result);
+    SetLength(Result, Len + 1);
+    Result[Len] := AvatarsPath.Append(FileInfo.Name);
+  end;
+end;
+
+// Pick `Count` distinct random avatars from the jpg pool and assign them to
+// AvatarPlayerTextures. Falls back to tinted NoAvatarTexture per slot if the
+// pool is empty or smaller than Count.
+procedure AssignDefaultAvatars(Count: Integer);
+var
+  Portraits: TPathDynArray;
+  I, J: Integer;
+  Swap: IPath;
+  Col: TRGB;
+begin
+  Portraits := ListPortraitAvatars;
+
+  // Partial Fisher-Yates: shuffle the first min(Count, Length) entries.
+  for I := 0 to Count - 1 do
+  begin
+    if I >= Length(Portraits) then Break;
+    J := I + Random(Length(Portraits) - I);
+    if J <> I then
+    begin
+      Swap := Portraits[I];
+      Portraits[I] := Portraits[J];
+      Portraits[J] := Swap;
+    end;
+  end;
+
+  for I := 1 to Count do
+  begin
+    if I - 1 < Length(Portraits) then
+      AvatarPlayerTextures[I] := Texture.LoadTexture(Portraits[I - 1])
+    else
+    begin
+      EnsureNoAvatarLoaded;
+      AvatarPlayerTextures[I] := NoAvatarTexture[I];
+      Col := GetPlayerColor(Ini.PlayerColor[I - 1]);
+      AvatarPlayerTextures[I].ColR := Col.R;
+      AvatarPlayerTextures[I].ColG := Col.G;
+      AvatarPlayerTextures[I].ColB := Col.B;
+    end;
+  end;
+end;
+
+// --- Screen lifecycle ---
 
 constructor TScreenNextUp.Create;
 var
@@ -75,9 +161,8 @@ begin
 
   // Custom handoff background image. Skin.GetTextureFileName resolves the
   // logical name NextUpBG (registered in Blue.ini / Winter.ini) to
-  // [bg-nextup].png. TMenuBackgroundTexture stretches it across the 800x600
-  // virtual canvas via glBegin(GL_QUADS). Falls back to a dark color if the
-  // texture fails to load (e.g. file missing on a different skin).
+  // [bg-nextup].png. Falls back to a dark neutral fill if the texture
+  // fails to load.
   try
     BgCfg.BGType := bgtTexture;
     BgCfg.Color.R := 1.0;
@@ -94,7 +179,6 @@ begin
     Background := TMenuBackgroundColor.Create(BgCfg);
   end;
 
-  // Virtual canvas is 800x600. Font 0 = default proportional, style 0 = plain.
   HeaderIdx  := AddText(400,  80, 0, 0, 48, 1,    1,    1,    'Up Next');
   TitleIdx   := AddText(400, 200, 0, 0, 40, 1,    1,    1,    '');
   ArtistIdx  := AddText(400, 260, 0, 0, 30, 0.85, 0.85, 0.85, '');
@@ -112,9 +196,8 @@ begin
   inherited;
   Applied := false;
 
-  // If we're arriving from ScreenMain (pull path), its BG music is still
-  // running on a separate AudioPlayback stream. From ScreenScore (push path)
-  // it's already paused. PauseBgMusic is idempotent, so call unconditionally.
+  // Pull path from ScreenMain leaves BG music running; push path from Score
+  // has it paused already. PauseBgMusic is idempotent.
   SoundLib.PauseBgMusic;
 
   if QueuedSong.Active and (QueuedSong.Requester <> '') then
@@ -126,8 +209,6 @@ begin
   Text[ArtistIdx].Text  := QueuedSong.Artist;
   Text[Player1Idx].Text := 'Player 1: ' + RequesterLabel;
 
-  // Hide Player 2 row when the session is 1-player — the epic only shows it
-  // in 2P mode where the literal "Player 2" slot exists.
   Text[Player2Idx].Visible := QueuedSong.Active and QueuedSong.Is2P;
   if QueuedSong.Is2P then
     Text[Player2Idx].Text := 'Player 2: Player 2';
@@ -146,36 +227,55 @@ begin
 end;
 
 procedure TScreenNextUp.StartNow;
+var
+  NewPlayersPlay: Integer;
 begin
   if Applied then Exit;
   Applied := true;
-  if not QueuedSong.Active then Exit;   // nothing to apply — shouldn't happen, defensive
+  if not QueuedSong.Active then Exit;
 
-  // Apply cached state right before transitioning so /now-playing during the
-  // handoff still reports the previous (or null) song. Player count was locked
-  // at session start and is not touched here — only the Name slots change
-  // round-to-round. Ini.Name[] is config, Player[].Name is runtime, and
-  // ScreenSing.PlayerNames[] is the HUD snapshot (UScreenSingView.pas:551).
+  // Full pre-Sing ritual — mirrors UScreenName.pas:362-417. Runs regardless
+  // of push/pull entry path. For mid-session 2P-stays-2P the Ini writes are
+  // effectively no-ops and the recreate is cheap enough that we don't branch.
   CatSongs.Selected := QueuedSong.SongId;
-  Ini.Name[0] := QueuedSong.Requester;
-  if High(Player) >= 0 then
-    Player[0].Name := QueuedSong.Requester;
   if QueuedSong.Is2P then
   begin
+    Ini.Players := 1;        // IPlayersVals[1] = 2
+    NewPlayersPlay := 2;
+    Ini.Name[0] := QueuedSong.Requester;
     Ini.Name[1] := 'Player 2';
-    if High(Player) >= 1 then
-      Player[1].Name := 'Player 2';
+  end
+  else
+  begin
+    Ini.Players := 0;        // IPlayersVals[0] = 1
+    NewPlayersPlay := 1;
+    Ini.Name[0] := QueuedSong.Requester;
+  end;
+  PlayersPlay := NewPlayersPlay;
+
+  SetLength(Player, PlayersPlay);
+  Player[0].Name  := Ini.Name[0];
+  Player[0].Level := Ini.PlayerLevel[0];
+  if PlayersPlay >= 2 then
+  begin
+    Player[1].Name  := Ini.Name[1];
+    Player[1].Level := Ini.PlayerLevel[1];
   end;
 
-  if not Assigned(ScreenSing) then
-    TScreenSingController.Create;
+  AssignDefaultAvatars(PlayersPlay);
+  LoadPlayersColors;
+  Theme.ThemeScoreLoad;
 
-  ScreenSing.PlayerNames[1] := Ini.Name[0];
-  if QueuedSong.Is2P then
-    ScreenSing.PlayerNames[2] := Ini.Name[1];
+  // Recreate ScreenSing and ScreenScore so their constructors capture the
+  // Player[].Name and AvatarPlayerTextures[] snapshots we just established.
+  // Safe: CurrentScreen is ScreenNextUp right now, not either of the screens
+  // being freed. Mirrors UScreenName.pas:410-414.
+  if Assigned(ScreenSing)  then FreeAndNil(ScreenSing);
+  if Assigned(ScreenScore) then FreeAndNil(ScreenScore);
+  TScreenSingController.Create;   // self-assigns ScreenSing := Self
+  ScreenScore := TScreenScore.Create;
 
-  // Consume the queue slot — this was the "next up" song, now it's started.
-  QueuedSong.Active := false;
+  QueuedSong.Active := false;     // consumed
 
   FadeTo(@ScreenSing);
 end;
@@ -183,13 +283,10 @@ end;
 procedure TScreenNextUp.Cancel;
 begin
   Applied := true;
-  // ScreenMain.OnShow starts BG music via PlaySound, which layers ON TOP of
-  // any stream still open on AudioPlayback (e.g., the previous song from
-  // ScreenSing — its stream survives the Sing→Score→NextUp transitions).
-  // Stop explicitly so main menu is silent-then-BG, not dueling audio.
+  // Stop any stream the previous session left open; otherwise ScreenMain's
+  // StartBgMusic stacks on top and both play simultaneously.
   AudioPlayback.Stop;
-  // QueuedSong is NOT cleared — user can return via Sing-button pull and
-  // resume this same handoff.
+  // QueuedSong is NOT cleared — user can return via Sing-button pull.
   FadeTo(@ScreenMain);
 end;
 
