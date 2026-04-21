@@ -187,6 +187,11 @@ end;
 procedure TScreenNextUp.Cancel;
 begin
   Applied := true;
+  // ScreenMain.OnShow starts BG music via PlaySound, which layers ON TOP of
+  // any stream still open on AudioPlayback (e.g., the previous song from
+  // ScreenSing — its stream survives the Sing→Score→NextUp transitions).
+  // Stop explicitly so main menu is silent-then-BG, not dueling audio.
+  AudioPlayback.Stop;
   FadeTo(@ScreenMain);
 end;
 
