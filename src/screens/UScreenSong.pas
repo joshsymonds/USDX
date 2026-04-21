@@ -910,7 +910,7 @@ begin
           Exit;
         end;
 
-      SDLK_J: //Show Jumpto Menu
+      SDLK_S: //Show Jumpto Menu
         begin
           if (Songs.SongList.Count > 0) and (FreeListMode) then
           begin
@@ -923,17 +923,6 @@ begin
         begin
           OpenEditor;
           Exit;
-        end;
-
-      SDLK_S:
-        begin
-          if not (SDL_ModState = KMOD_LSHIFT) and (CatSongs.Song[Interaction].Medley.Source>=msTag)
-            and not MakeMedley and (Mode = smNormal) then
-            StartMedley(0, msTag)
-          else if not MakeMedley and
-            (CatSongs.Song[Interaction].Medley.Source>=msCalculated) and
-            (Mode = smNormal)then
-            StartMedley(0, msCalculated);
         end;
 
       SDLK_D:
