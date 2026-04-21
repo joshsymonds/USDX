@@ -46,7 +46,7 @@ Stage a song into the `QueuedSong` slot. Replaces any existing stage. Does NOT t
 
 ```json
 {
-  "songId": 42,
+  "songId": "a1b2c3d4e5f67890",
   "requester": "Alice",
   "players": 2
 }
@@ -54,7 +54,7 @@ Stage a song into the `QueuedSong` slot. Replaces any existing stage. Does NOT t
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `songId` | integer | yes | Index into the `/songs` array at stage time. See "Song identity caveat" below. |
+| `songId` | string | yes | Stable 16-hex-char content hash of the song. Fetch from `/songs`. See "Stable song IDs" below. |
 | `requester` | string | yes | Name of the person requesting — becomes Player 1's HUD label. Non-empty. |
 | `players` | integer | no (default 1) | `1` or `2`. Honored only when USDX is on ScreenMain; silently ignored on ScreenScore. |
 
@@ -66,11 +66,12 @@ Stage a song into the `QueuedSong` slot. Replaces any existing stage. Does NOT t
 | `400` | `{"error":"malformed json"}` | Body didn't parse as JSON |
 | `400` | `{"error":"body must be an object"}` | Parsed to a non-object (array, number, etc.) |
 | `400` | `{"error":"legacy fields removed; use requester"}` | Body contains `singer` or `singers` (v1 API shape — rejected outright, no shim) |
+| `400` | `{"error":"songId required (string)"}` | Missing, non-string, or empty `songId` (integer IDs are no longer accepted) |
 | `400` | `{"error":"requester required"}` | Missing or empty `requester` |
 | `400` | `{"error":"players must be 1 or 2"}` | `players` present but not a JSON integer ∈ {1,2} |
 | `409` | `{"error":"song in progress"}` | USDX is on ScreenSing (mid-song); queue is untouched |
 | `413` | `{"error":"body too large"}` | Body exceeds 64 KB |
-| `404` | `{"error":"song not found"}` | `songId` out of range even after a `CatSongs.Refresh` retry |
+| `404` | `{"error":"unknown songId"}` | `songId` does not match any loaded song |
 | `504` | `{"error":"timeout"}` | Main thread didn't drain the command within 10 s (rare; under severe load) |
 | `500` | `{"error":"internal"}` | Unhandled exception; check USDX's `Error.log` |
 
@@ -81,25 +82,33 @@ Stage a song into the `QueuedSong` slot. Replaces any existing stage. Does NOT t
 ```sh
 curl -X POST http://deck:9000/queue \
   -H 'Content-Type: application/json' \
-  -d '{"songId":42,"requester":"Alice","players":2}'
+  -d '{"songId":"a1b2c3d4e5f67890","requester":"Alice","players":2}'
 # → 200 {"status":"playing"}
 ```
 
 ### `GET /songs`
 
-Return the full song library visible to USDX, in the order they appear in `CatSongs.Song`. SoundStage should cache this and invalidate on any `/queue` response of `404 song not found` (indicating the index space changed — user added or removed files).
+Return the full song library visible to USDX. Category header entries are omitted. Order matches USDX's current sort setting; it is **not** a stable iteration order — use `id` for identity.
 
 **Response (`200`):**
 
 ```json
 [
-  {"id": 0, "title": "I'm Not In Love", "artist": "10cc"},
-  {"id": 1, "title": "What's Up?", "artist": "4 Non Blondes"},
+  {"id": "a1b2c3d4e5f67890", "title": "I'm Not In Love", "artist": "10cc", "duet": false},
+  {"id": "9988776655443322", "title": "What's Up?", "artist": "4 Non Blondes", "duet": false},
+  {"id": "deadbeef01234567", "title": "Islands in the Stream", "artist": "Kenny Rogers & Dolly Parton", "duet": true},
   ...
 ]
 ```
 
-Potentially several thousand entries on a large library; worst-case ~60 KB wire. Serialization is O(N) via internal string builder.
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Stable 16-hex-char content hash. Persists across `CatSongs.Refresh`, restarts, and file moves. |
+| `title` | string | Song title. |
+| `artist` | string | Song artist. |
+| `duet` | boolean | Whether the song has duet (P1/P2) note sections. Affects how it's scored; also factors into the `id` hash. |
+
+Potentially several thousand entries on a large library; worst-case ~80 KB wire. Serialization is O(N) via internal string builder.
 
 ### `GET /now-playing`
 
@@ -109,6 +118,7 @@ Current song state. Returns `null` unless USDX is actively on ScreenSing with au
 
 ```json
 {
+  "id": "deadbeef01234567",
   "title": "Take On Me",
   "artist": "a-ha",
   "elapsed": 42.715,
@@ -116,7 +126,7 @@ Current song state. Returns `null` unless USDX is actively on ScreenSing with au
 }
 ```
 
-Times are in seconds. Always HTTP `200`.
+Times are in seconds. `id` is the stable hash. Always HTTP `200`.
 
 ### `POST /pause`
 
@@ -144,9 +154,9 @@ Internal state dump. Intended for development iteration; not part of the stable 
     {"name": "Player 2", "level": 1}
   ],
   "screenSingPlayerNames": ["Alice", "Player 2", "", ...],
-  "currentSong": {"id": 15, "title": "Take On Me", "artist": "a-ha"},
+  "currentSong": {"id": "deadbeef01234567", "title": "Take On Me", "artist": "a-ha"},
   "queuedSong": {
-    "songId": 28,
+    "songId": "cafebabe89abcdef",
     "requester": "Charlie",
     "is2P": false,
     "title": "Dancing Queen",
@@ -158,16 +168,30 @@ Internal state dump. Intended for development iteration; not part of the stable 
 - `screen`: one of `"ScreenMain"`, `"ScreenSing"`, `"ScreenScore"`, `"ScreenNextUp"`, `"other"`, `"nil"`.
 - `iniPlayers`: index into `IPlayersVals = (1,2,3,4,6)`. `0` = 1 player, `1` = 2 players, etc.
 - `playersPlay`: actual count derived from above; drives `SetLength(Player, ...)`.
+- `currentSong.id` and `queuedSong.songId` are stable content hashes matching the `id` values from `/songs`.
 - `queuedSong`: `null` when the slot is empty (consumed or never written).
 
-## Song identity caveat
+## Stable song IDs
 
-`songId` is the runtime index into USDX's `CatSongs.Song` array. This index is **not stable across `CatSongs.Refresh`** — if songs are added or removed on disk, indices shift. SoundStage should:
+Each song has a deterministic 16-hex-char `id` computed at load time as:
 
-1. Fetch `/songs` at startup (or on cache miss) and cache the `id ↔ (title, artist)` mapping.
-2. On any `404 song not found` from `/queue`, invalidate the cache and refetch.
+```
+id = lowercase(md5(
+    lowercase(trim(artist)) + "\0" +
+    lowercase(trim(title))  + "\0" +
+    (duet ? "1" : "0")
+)[0:16])
+```
 
-A future version of this API may replace integer `songId` with a stable hash (`MD5(artist + "\0" + title + "\0" + duet)`). Until then, treat the index as a short-lived handle.
+Properties:
+
+- **Stable across `CatSongs.Refresh` and restarts.** Persists as long as the song's normalized (artist, title, duet) doesn't change.
+- **Stable across file moves.** The `id` is content-addressed, not path-addressed.
+- **Unstable under metadata edits.** Renaming `artist` or `title`, or flipping duet status, changes the `id`.
+- **Collisions are logged and first-wins.** Two files with identical normalized (artist, title, duet) will produce the same hash. USDX keeps the first one loaded and logs both paths; the user can disambiguate by editing metadata on one file (e.g., adding `(Cover)` to the title).
+- **ASCII-normalized only.** Unicode case-folding is NOT performed. Case differences across non-ASCII characters in `artist`/`title` will produce distinct IDs. Not expected to matter in practice.
+
+Cache the `id → (title, artist, duet)` mapping aggressively on SoundStage's side; on a `404 unknown songId` response from `/queue`, refetch `/songs` to pick up rename/removal events.
 
 ## Lifecycle signals
 
@@ -176,4 +200,4 @@ A future version of this API may replace integer `songId` with a stable hash (`M
 
 ## Version
 
-This document describes the API after Epic #11 + Epic #12 landed (merge commit `d8db991` on `master`). No versioning header is sent; add one if the shape diverges from what's here.
+This document describes the API after the stable-song-IDs migration landed on `master`. No versioning header is sent; add one if the shape diverges from what's here.
