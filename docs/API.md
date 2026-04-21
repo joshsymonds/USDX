@@ -128,6 +128,62 @@ Current song state. Returns `null` unless USDX is actively on ScreenSing with au
 
 Times are in seconds. `id` is the stable hash. Always HTTP `200`.
 
+### `POST /refresh`
+
+Incrementally add or replace a single song file in the loaded library. SoundStage should call this after downloading a new song (and after any lyricization post-processing completes). Runs the full parse + `CatSongs.Refresh` synchronously on the main thread; typical latency under 200 ms on NFS.
+
+Scope is deliberately narrow: one `.txt` file per call. There is no bulk-rescan endpoint — SoundStage knows which files it wrote.
+
+**Request body:**
+
+```json
+{
+  "path": "/home/deck/Songs/Artist - Title/Artist - Title.txt"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | yes | Absolute filesystem path to the song's `.txt` file. Case-insensitive suffix check for `.txt`. |
+
+**Behavior:**
+
+1. Validate path (absolute, ends in `.txt`, exists).
+2. Parse the file via `TSong.Analyse`. Parse failure → 400.
+3. Remove any existing song whose path matches the incoming path (edit-in-place).
+4. Compute the new song's stable `id`.
+5. If any OTHER loaded song has the same `id` (genuine metadata collision), remove that one and log a warning with both paths. New file wins.
+6. Add the new song to the library and call `CatSongs.Refresh`.
+
+**Responses:**
+
+| Status | Body | When |
+|---|---|---|
+| `200` | `{"added":true,"id":"<hex>","title":"<title>"}` | Song was added or replaced |
+| `400` | `{"error":"malformed json"}` | Body didn't parse as JSON |
+| `400` | `{"error":"body must be an object"}` | Parsed to a non-object |
+| `400` | `{"error":"path required (string)"}` | Missing, non-string, or empty `path` |
+| `400` | `{"added":false,"error":"path must be absolute"}` | Path doesn't start with `/` |
+| `400` | `{"added":false,"error":"path must end in .txt"}` | Non-`.txt` suffix |
+| `400` | `{"added":false,"error":"parse failed"}` | `TSong.Analyse` returned false (malformed USDX song file) |
+| `404` | `{"added":false,"error":"path not found"}` | Path doesn't exist on the USDX host's filesystem |
+| `409` | `{"added":false,"error":"song in progress"}` | USDX is on ScreenSing; mutation of `Songs.SongList` would race with rendering |
+| `413` | `{"error":"body too large"}` | Body exceeds 64 KB |
+| `503` | `{"added":false,"error":"library still loading"}` | Initial song-directory scan is still running |
+| `504` | `{"error":"timeout"}` | Main thread didn't drain within 15 s (NFS hang or similar) |
+| `500` | `{"error":"internal"}` | Unhandled exception |
+
+**Idempotency:** yes — re-posting the same path parses and replaces-in-place, producing the same `id` (assuming the file content is unchanged). Safe to retry.
+
+**Example:**
+
+```sh
+curl -X POST http://deck:9000/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/home/deck/Songs/Toto - Africa/Toto - Africa.txt"}'
+# → 200 {"added":true,"id":"a1b2c3d4e5f67890","title":"Africa"}
+```
+
 ### `POST /pause`
 
 Pause the currently-playing song's audio stream. Returns `409 {"error":"not playing"}` if no audio is active. `200 {"status":"paused"}` on success. No body.

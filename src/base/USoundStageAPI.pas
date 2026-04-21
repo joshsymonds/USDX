@@ -26,7 +26,7 @@ uses
   httpdefs;
 
 type
-  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdQueue, cmdDebugState);
+  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdQueue, cmdDebugState, cmdRefresh);
 
   // Process-lifetime pending song slot. Populated by POST /queue on any screen
   // except ScreenSing (409). Consumed by ScreenNextUp.StartNow on Enter.
@@ -54,6 +54,8 @@ type
     QueueSongId: UTF8String;  // stable content-hash (16 hex chars)
     QueueRequester: UTF8String;
     QueuePlayers: integer;  // 1 or 2; -1 = omitted (only honored on first /queue of session)
+    // cmdRefresh payload — absolute path to a song's .txt file.
+    RefreshPath: UTF8String;
     constructor Create(AKind: TSoundStageCmdKind);
     destructor Destroy; override;
     procedure Release;
@@ -101,7 +103,9 @@ uses
   UGraphic,
   UIni,
   UNote,
+  UPath,
   UScreenNextUp,
+  USong,
   USongs,
   UMusic,
   ULog;
@@ -165,6 +169,7 @@ begin
   QueueSongId := '';
   QueueRequester := '';
   QueuePlayers := -1;
+  RefreshPath := '';
 end;
 
 destructor TSoundStageCmd.Destroy;
@@ -367,6 +372,8 @@ var
   PlayersNode: TJSONData;
   SongIdNode: TJSONData;
   SongIdStr: UTF8String;
+  PathNode: TJSONData;
+  RefreshPathStr: UTF8String;
   PlayersVal: Integer;
   List: TList;
 begin
@@ -467,6 +474,71 @@ begin
         FQueue.UnlockList;
       end;
       Cmd.ReplyEvent.WaitFor(10000);
+
+      try
+        AResponse.Code := Cmd.ReplyStatus;
+        AResponse.Content := Cmd.ReplyJSON;
+      finally
+        Cmd.Release;
+      end;
+      Exit;
+    end;
+
+    // POST /refresh parses a body before enqueueing (same shape as /queue).
+    if (ARequest.Method = 'POST') and (ARequest.URI = '/refresh') then
+    begin
+      if System.Length(ARequest.Content) > 65536 then
+      begin
+        AResponse.Code := 413;
+        AResponse.Content := '{"error":"body too large"}';
+        Exit;
+      end;
+      JSONData := nil;
+      try
+        try
+          JSONData := GetJSON(ARequest.Content);
+        except
+          on E: Exception do
+          begin
+            AResponse.Code := 400;
+            AResponse.Content := '{"error":"malformed json"}';
+            Exit;
+          end;
+        end;
+        if not (JSONData is TJSONObject) then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"body must be an object"}';
+          Exit;
+        end;
+        Obj := TJSONObject(JSONData);
+        PathNode := Obj.Find('path');
+        if (PathNode = nil) or (PathNode.JSONType <> jtString) then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"path required (string)"}';
+          Exit;
+        end;
+        RefreshPathStr := PathNode.AsString;
+        if RefreshPathStr = '' then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"path required (string)"}';
+          Exit;
+        end;
+        Cmd := TSoundStageCmd.Create(cmdRefresh);
+        Cmd.RefreshPath := RefreshPathStr;
+      finally
+        if Assigned(JSONData) then JSONData.Free;
+      end;
+
+      List := FQueue.LockList;
+      try
+        List.Add(Cmd);
+      finally
+        FQueue.UnlockList;
+      end;
+      Cmd.ReplyEvent.WaitFor(15000);  // Analyse can be slow on NFS
 
       try
         AResponse.Code := Cmd.ReplyStatus;
@@ -715,6 +787,107 @@ begin
   Cmd.ReplyJSON := '{"status":"playing"}';
 end;
 
+// Drain-time handler for POST /refresh. Runs on the main thread so direct
+// mutation of Songs.SongList and CatSongs is safe.
+procedure HandleRefreshCommand(Cmd: TSoundStageCmd);
+var
+  IncomingPath: IPath;
+  NewSong, Existing: TSong;
+  ExistingFull: IPath;
+  I: Integer;
+  LowerP: UTF8String;
+begin
+  // Reject mid-song: mutating Songs/CatSongs while the game is rendering
+  // from CatSongs.Song[CatSongs.Selected] is a correctness hazard.
+  if Display.CurrentScreen = @ScreenSing then
+  begin
+    Cmd.ReplyStatus := 409;
+    Cmd.ReplyJSON := '{"added":false,"error":"song in progress"}';
+    Exit;
+  end;
+
+  // Initial library scan runs on a background thread; racing it from here
+  // would corrupt SongList.
+  if (Songs <> nil) and Songs.Processing then
+  begin
+    Cmd.ReplyStatus := 503;
+    Cmd.ReplyJSON := '{"added":false,"error":"library still loading"}';
+    Exit;
+  end;
+
+  // Case-insensitive .txt suffix check.
+  LowerP := LowerCase(Cmd.RefreshPath);
+  if (System.Length(LowerP) < 5) or
+     (Copy(LowerP, System.Length(LowerP) - 3, 4) <> '.txt') then
+  begin
+    Cmd.ReplyStatus := 400;
+    Cmd.ReplyJSON := '{"added":false,"error":"path must end in .txt"}';
+    Exit;
+  end;
+
+  IncomingPath := Path(Cmd.RefreshPath);
+  if not IncomingPath.IsAbsolute then
+  begin
+    Cmd.ReplyStatus := 400;
+    Cmd.ReplyJSON := '{"added":false,"error":"path must be absolute"}';
+    Exit;
+  end;
+
+  if not FileExists(Cmd.RefreshPath) then
+  begin
+    Cmd.ReplyStatus := 404;
+    Cmd.ReplyJSON := '{"added":false,"error":"path not found"}';
+    Exit;
+  end;
+
+  NewSong := TSong.Create(IncomingPath);
+  if not NewSong.Analyse then
+  begin
+    Log.LogError('Refresh: Analyse failed for ' + IncomingPath.ToNative, 'SoundStage');
+    NewSong.Free;
+    Cmd.ReplyStatus := 400;
+    Cmd.ReplyJSON := '{"added":false,"error":"parse failed"}';
+    Exit;
+  end;
+
+  // Remove any existing entry at the same path (edit-in-place case).
+  for I := Songs.SongList.Count - 1 downto 0 do
+  begin
+    Existing := TSong(Songs.SongList[I]);
+    if Existing = nil then continue;
+    ExistingFull := Existing.Path.Append(Existing.FileName);
+    if ExistingFull.Equals(IncomingPath) then
+    begin
+      Songs.SongList.Delete(I);
+      Existing.Free;
+    end;
+  end;
+
+  // Remove any OTHER entry (different path) whose ID now matches the new
+  // song — genuine content collision. New file wins; log both paths so the
+  // user can spot the conflict.
+  for I := Songs.SongList.Count - 1 downto 0 do
+  begin
+    Existing := TSong(Songs.SongList[I]);
+    if (Existing <> nil) and (Existing.ID = NewSong.ID) then
+    begin
+      Log.LogWarn(Format('Refresh: ID %s collision; replacing %s with %s',
+        [NewSong.ID,
+         Existing.Path.Append(Existing.FileName).ToNative,
+         IncomingPath.ToNative]), 'SoundStage');
+      Songs.SongList.Delete(I);
+      Existing.Free;
+    end;
+  end;
+
+  Songs.SongList.Add(NewSong);
+  CatSongs.Refresh;
+
+  Cmd.ReplyStatus := 200;
+  Cmd.ReplyJSON := Format('{"added":true,"id":%s,"title":%s}',
+    [JsonStr(NewSong.ID), JsonStr(NewSong.Title)]);
+end;
+
 procedure TSoundStageServer.Drain;
 var
   List: TList;
@@ -789,6 +962,8 @@ begin
             Cmd.ReplyJSON := DebugStateJson;
             Cmd.ReplyStatus := 200;
           end;
+        cmdRefresh:
+          HandleRefreshCommand(Cmd);
       end;
     except
       on E: Exception do
