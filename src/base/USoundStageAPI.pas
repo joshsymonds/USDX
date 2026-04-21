@@ -26,9 +26,9 @@ uses
   httpdefs;
 
 type
-  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdPlay, cmdDebugState);
+  TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdQueue, cmdDebugState);
 
-  // Process-lifetime pending song slot. Populated by POST /play on any screen
+  // Process-lifetime pending song slot. Populated by POST /queue on any screen
   // except ScreenSing (409). Consumed by ScreenNextUp.StartNow on Enter.
   // Preserved across Esc cancels (user can return via Sing-button pull).
   // Active = false means the slot is empty — no queue.
@@ -49,11 +49,11 @@ type
     ReplyEvent: TEvent;
     ReplyJSON: string;
     ReplyStatus: integer;
-    // cmdPlay payload — parsed from request body on the handler thread,
+    // cmdQueue payload — parsed from request body on the handler thread,
     // consumed on the main thread by the drain handler.
-    PlaySongId: integer;
-    PlayRequester: UTF8String;
-    PlayPlayers: integer;   // 1 or 2; -1 = omitted (only honored on first /play of session)
+    QueueSongId: integer;
+    QueueRequester: UTF8String;
+    QueuePlayers: integer;  // 1 or 2; -1 = omitted (only honored on first /queue of session)
     constructor Create(AKind: TSoundStageCmdKind);
     destructor Destroy; override;
     procedure Release;
@@ -162,9 +162,9 @@ begin
   // thread ships these defaults — better than an empty 500 body.
   ReplyJSON := '{"error":"timeout"}';
   ReplyStatus := 504;
-  PlaySongId := -1;
-  PlayRequester := '';
-  PlayPlayers := -1;
+  QueueSongId := -1;
+  QueueRequester := '';
+  QueuePlayers := -1;
 end;
 
 destructor TSoundStageCmd.Destroy;
@@ -370,8 +370,8 @@ var
 begin
   AResponse.ContentType := 'application/json';
   try
-    // POST /play parses a body before enqueueing.
-    if (ARequest.Method = 'POST') and (ARequest.URI = '/play') then
+    // POST /queue parses a body before enqueueing.
+    if (ARequest.Method = 'POST') and (ARequest.URI = '/queue') then
     begin
       // Cap body size so a misbehaving or malicious client can't OOM USDX
       // by posting multi-megabyte payloads. 64 KB is ample for a 3-field JSON.
@@ -434,10 +434,10 @@ begin
             Exit;
           end;
         end;
-        Cmd := TSoundStageCmd.Create(cmdPlay);
-        Cmd.PlaySongId := Obj.Get('songId', -1);
-        Cmd.PlayRequester := Obj.Get('requester', '');
-        Cmd.PlayPlayers := PlayersVal;
+        Cmd := TSoundStageCmd.Create(cmdQueue);
+        Cmd.QueueSongId := Obj.Get('songId', -1);
+        Cmd.QueueRequester := Obj.Get('requester', '');
+        Cmd.QueuePlayers := PlayersVal;
       finally
         if Assigned(JSONData) then JSONData.Free;
       end;
@@ -640,13 +640,13 @@ begin
   end;
 end;
 
-// Drain-time handler for POST /play. Runs on the main thread, so direct
+// Drain-time handler for POST /queue. Runs on the main thread, so direct
 // access to CatSongs/Ini/Display/ScreenSing is safe.
-procedure HandlePlayCommand(Cmd: TSoundStageCmd);
+procedure HandleQueueCommand(Cmd: TSoundStageCmd);
 var
   SongId: Integer;
 begin
-  SongId := Cmd.PlaySongId;
+  SongId := Cmd.QueueSongId;
 
   // Resolve songId; if out of range, ask CatSongs to rescan and retry once.
   if (SongId < 0) or (SongId >= Length(CatSongs.Song)) then
@@ -662,7 +662,7 @@ begin
     end;
   end;
 
-  // Reject mid-song — Go owns the queue; mid-ScreenSing /play is a Go bug.
+  // Reject mid-song — Go owns the queue; mid-ScreenSing /queue is a Go bug.
   if Display.CurrentScreen = @ScreenSing then
   begin
     Cmd.ReplyStatus := 409;
@@ -682,11 +682,11 @@ begin
 
   QueuedSong.Active    := true;
   QueuedSong.SongId    := SongId;
-  QueuedSong.Requester := Cmd.PlayRequester;
+  QueuedSong.Requester := Cmd.QueueRequester;
   if Display.CurrentScreen = @ScreenScore then
     QueuedSong.Is2P := (Ini.Players = 1)     // session-locked — IPlayersVals[1] = 2
   else
-    QueuedSong.Is2P := (Cmd.PlayPlayers = 2);
+    QueuedSong.Is2P := (Cmd.QueuePlayers = 2);
   QueuedSong.Title  := CatSongs.Song[SongId].Title;
   QueuedSong.Artist := CatSongs.Song[SongId].Artist;
 
@@ -764,8 +764,8 @@ begin
               Cmd.ReplyJSON := '{"status":"resumed"}';
             end;
           end;
-        cmdPlay:
-          HandlePlayCommand(Cmd);
+        cmdQueue:
+          HandleQueueCommand(Cmd);
         cmdDebugState:
           begin
             Cmd.ReplyJSON := DebugStateJson;

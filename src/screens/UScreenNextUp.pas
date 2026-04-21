@@ -9,7 +9,7 @@
  *
  * StartNow owns the full pre-Sing ritual (Ini.Players, SetLength(Player),
  * Player[].Name/Level, avatar textures, LoadPlayersColors, ThemeScoreLoad,
- * FreeAndNil+recreate ScreenSing/ScreenScore). HandlePlayCommand in the
+ * FreeAndNil+recreate ScreenSing/ScreenScore). HandleQueueCommand in the
  * HTTP layer is just a queue-writer; the heavy lifting all lands here so
  * both pull-from-Main and push-from-Score go through the same codepath.
  *
@@ -37,8 +37,8 @@ uses
   UThemes,
   UUnicodeUtils;
 
-// Lazy-creates ScreenNextUp. Single entry point used by both the HTTP /play
-// drain handler (USoundStageAPI.HandlePlayCommand) and the ScreenMain Sing
+// Lazy-creates ScreenNextUp. Single entry point used by both the HTTP /queue
+// drain handler (USoundStageAPI.HandleQueueCommand) and the ScreenMain Sing
 // button intercept (UScreenMain.TrySingFromQueue).
 procedure EnsureScreenNextUp;
 
@@ -264,7 +264,7 @@ begin
 
   // Bounds-check the cached SongId in case CatSongs was refreshed (or the
   // song file deleted) between stage time and now. One retry via
-  // CatSongs.Refresh mirrors HandlePlayCommand's resolve logic — if still
+  // CatSongs.Refresh mirrors HandleQueueCommand's resolve logic — if still
   // out of range, drop the stale queue and bail to main menu.
   if (QueuedSong.SongId < 0) or (QueuedSong.SongId >= Length(CatSongs.Song)) then
   begin
