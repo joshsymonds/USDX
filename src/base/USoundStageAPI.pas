@@ -28,6 +28,19 @@ uses
 type
   TSoundStageCmdKind = (cmdNowPlaying, cmdSongs, cmdPause, cmdResume, cmdPlay, cmdDebugState);
 
+  // Process-lifetime pending song slot. Populated by POST /play on any screen
+  // except ScreenSing (409). Consumed by ScreenNextUp.StartNow on Enter.
+  // Preserved across Esc cancels (user can return via Sing-button pull).
+  // Active = false means the slot is empty — no queue.
+  TQueuedSong = record
+    Active:    boolean;
+    SongId:    integer;
+    Requester: UTF8String;
+    Is2P:      boolean;
+    Title:     UTF8String;
+    Artist:    UTF8String;
+  end;
+
   TSoundStageCmd = class
   private
     FRefCount: integer;
@@ -77,6 +90,7 @@ type
 
 var
   SoundStageServer: TSoundStageServer = nil;
+  QueuedSong: TQueuedSong;
 
 implementation
 
@@ -638,6 +652,16 @@ begin
   else
     Result := Result + 'null';
 
+  Result := Result + ',"queuedSong":';
+  if QueuedSong.Active then
+    Result := Result + '{"songId":' + IntToStr(QueuedSong.SongId) +
+                       ',"requester":' + JsonStr(QueuedSong.Requester) +
+                       ',"is2P":' + LowerCase(BoolToStr(QueuedSong.Is2P, true)) +
+                       ',"title":' + JsonStr(QueuedSong.Title) +
+                       ',"artist":' + JsonStr(QueuedSong.Artist) + '}'
+  else
+    Result := Result + 'null';
+
   Result := Result + '}';
 end;
 
@@ -695,15 +719,16 @@ begin
     // Mid-session handoff: player count is session-locked (already in
     // Ini.Players). Only the requester changes round-to-round; Player 2 is
     // a fixed literal, set once at session start. ScreenSing already exists
-    // with the correct 2P/1P layout — cache on ScreenNextUp and let StartNow
-    // update Player[].Name + ScreenSing.PlayerNames. Avatars stay as-is.
+    // with the correct 2P/1P layout — stage on the global QueuedSong and
+    // let StartNow apply on Enter. Avatars stay as-is.
     if not Assigned(ScreenNextUp) then
       ScreenNextUp := TScreenNextUp.Create;
-    ScreenNextUp.PendingSongId    := SongId;
-    ScreenNextUp.PendingRequester := Cmd.PlayRequester;
-    ScreenNextUp.PendingIs2P      := (Ini.Players = 1);  // Ini.Players is an IPlayersVals index; 1 → 2 players
-    ScreenNextUp.PendingTitle     := CatSongs.Song[SongId].Title;
-    ScreenNextUp.PendingArtist    := CatSongs.Song[SongId].Artist;
+    QueuedSong.Active    := true;
+    QueuedSong.SongId    := SongId;
+    QueuedSong.Requester := Cmd.PlayRequester;
+    QueuedSong.Is2P      := (Ini.Players = 1);  // Ini.Players is an IPlayersVals index; 1 → 2 players
+    QueuedSong.Title     := CatSongs.Song[SongId].Title;
+    QueuedSong.Artist    := CatSongs.Song[SongId].Artist;
     Display.FadeTo(@ScreenNextUp);
   end
   else
@@ -852,5 +877,6 @@ initialization
   JsonFS.DecimalSeparator := '.';
   JsonFS.ThousandSeparator := #0;
   Randomize;  // seed PRNG so AssignDefaultAvatars picks differently each process
+  QueuedSong.Active := false;
 
 end.

@@ -1,16 +1,14 @@
 {* UltraStar Deluxe — SoundStage Next-Up interstitial
  *
- * Displayed between songs when SoundStage's Go server dispatches the
- * next queued singer via POST /play while USDX is on ScreenScore.
- * Holds on screen indefinitely — Enter/Space applies the cached song
- * state and transitions to ScreenSing; Esc/Backspace cancels to
- * ScreenMain, ending the session. The indefinite hold is the whole
- * point: the real-life singers negotiate who takes the Player 2 slot.
+ * Displayed when SoundStage's Go server queues a song. Reads from the
+ * process-lifetime USoundStageAPI.QueuedSong slot — Enter/Space applies
+ * + clears the slot and transitions to ScreenSing; Esc/Backspace cancels
+ * to ScreenMain while PRESERVING the slot so the user can retry via
+ * main-menu pull. The indefinite hold is the whole point: the real-life
+ * singers negotiate who takes the Player 2 slot.
  *
- * Pending* fields are populated by POST /play's drain handler BEFORE
- * FadeTo(@ScreenNextUp). State is applied in StartNow (on Enter), so
- * /now-playing during the handoff still reports the previous song
- * (or null when AudioPlayback.Finished).
+ * /now-playing during the handoff still reports the previous (or null)
+ * song — QueuedSong is not applied until StartNow.
  *}
 
 unit UScreenNextUp;
@@ -36,13 +34,6 @@ uses
 type
   TScreenNextUp = class(TMenu)
   public
-    // Pending song state, set by POST /play handler before FadeTo.
-    PendingSongId:    integer;
-    PendingRequester: UTF8String;   // Player 1 name for the upcoming song
-    PendingIs2P:      boolean;      // true → session is 2-player
-    PendingTitle:     UTF8String;
-    PendingArtist:    UTF8String;
-
     // Text control indices
     HeaderIdx:  integer;
     TitleIdx:   integer;
@@ -73,7 +64,8 @@ uses
   UMenuBackgroundColor,
   UMenuBackgroundTexture,
   UScreenSingController,
-  USongs;
+  USongs,
+  USoundStageAPI;
 
 constructor TScreenNextUp.Create;
 var
@@ -82,10 +74,10 @@ begin
   inherited Create;
 
   // Custom handoff background image. Skin.GetTextureFileName resolves the
-  // filename within the active theme directory (game/themes/Modern/). Color
-  // is a white tint (1,1,1 = no tint); TMenuBackgroundTexture stretches the
-  // image across the 800x600 virtual canvas via glBegin(GL_QUADS). Falls
-  // back to a dark color if the texture fails to load (e.g. file missing).
+  // logical name NextUpBG (registered in Blue.ini / Winter.ini) to
+  // [bg-nextup].png. TMenuBackgroundTexture stretches it across the 800x600
+  // virtual canvas via glBegin(GL_QUADS). Falls back to a dark color if the
+  // texture fails to load (e.g. file missing on a different skin).
   try
     BgCfg.BGType := bgtTexture;
     BgCfg.Color.R := 1.0;
@@ -110,12 +102,7 @@ begin
   Player2Idx := AddText(400, 410, 0, 0, 36, 1,    1,    1,    '');
   PromptIdx  := AddText(400, 520, 0, 0, 24, 0.7,  0.7,  0.7,  'Press Enter to start');
 
-  PendingSongId    := -1;
-  PendingRequester := '';
-  PendingIs2P      := false;
-  PendingTitle     := '';
-  PendingArtist    := '';
-  Applied          := false;
+  Applied := false;
 end;
 
 procedure TScreenNextUp.OnShow;
@@ -125,19 +112,19 @@ begin
   inherited;
   Applied := false;
 
-  if PendingRequester <> '' then
-    RequesterLabel := PendingRequester
+  if QueuedSong.Active and (QueuedSong.Requester <> '') then
+    RequesterLabel := QueuedSong.Requester
   else
     RequesterLabel := 'Next singer';
 
-  Text[TitleIdx].Text   := PendingTitle;
-  Text[ArtistIdx].Text  := PendingArtist;
+  Text[TitleIdx].Text   := QueuedSong.Title;
+  Text[ArtistIdx].Text  := QueuedSong.Artist;
   Text[Player1Idx].Text := 'Player 1: ' + RequesterLabel;
 
   // Hide Player 2 row when the session is 1-player — the epic only shows it
   // in 2P mode where the literal "Player 2" slot exists.
-  Text[Player2Idx].Visible := PendingIs2P;
-  if PendingIs2P then
+  Text[Player2Idx].Visible := QueuedSong.Active and QueuedSong.Is2P;
+  if QueuedSong.Is2P then
     Text[Player2Idx].Text := 'Player 2: Player 2';
 end;
 
@@ -157,17 +144,18 @@ procedure TScreenNextUp.StartNow;
 begin
   if Applied then Exit;
   Applied := true;
+  if not QueuedSong.Active then Exit;   // nothing to apply — shouldn't happen, defensive
 
   // Apply cached state right before transitioning so /now-playing during the
   // handoff still reports the previous (or null) song. Player count was locked
   // at session start and is not touched here — only the Name slots change
   // round-to-round. Ini.Name[] is config, Player[].Name is runtime, and
   // ScreenSing.PlayerNames[] is the HUD snapshot (UScreenSingView.pas:551).
-  CatSongs.Selected := PendingSongId;
-  Ini.Name[0] := PendingRequester;
+  CatSongs.Selected := QueuedSong.SongId;
+  Ini.Name[0] := QueuedSong.Requester;
   if High(Player) >= 0 then
-    Player[0].Name := PendingRequester;
-  if PendingIs2P then
+    Player[0].Name := QueuedSong.Requester;
+  if QueuedSong.Is2P then
   begin
     Ini.Name[1] := 'Player 2';
     if High(Player) >= 1 then
@@ -178,8 +166,11 @@ begin
     TScreenSingController.Create;
 
   ScreenSing.PlayerNames[1] := Ini.Name[0];
-  if PendingIs2P then
+  if QueuedSong.Is2P then
     ScreenSing.PlayerNames[2] := Ini.Name[1];
+
+  // Consume the queue slot — this was the "next up" song, now it's started.
+  QueuedSong.Active := false;
 
   FadeTo(@ScreenSing);
 end;
@@ -192,6 +183,8 @@ begin
   // ScreenSing — its stream survives the Sing→Score→NextUp transitions).
   // Stop explicitly so main menu is silent-then-BG, not dueling audio.
   AudioPlayback.Stop;
+  // QueuedSong is NOT cleared — user can return via Sing-button pull and
+  // resume this same handoff.
   FadeTo(@ScreenMain);
 end;
 
