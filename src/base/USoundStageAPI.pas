@@ -222,21 +222,17 @@ begin
   try
     FServer := TFPHTTPServer.Create(nil);
     FServer.Port := FPort;
-    if Ini.SoundStageBindAddress <> '' then
-      FServer.Address := Ini.SoundStageBindAddress;
     FServer.Threaded := True;
-    // Guard against slowloris / abandoned sockets tying up an FPHTTPServer
-    // worker forever. 30s is generous for a local LAN client.
-    FServer.ConnectionTimeout := 30;
     FServer.OnRequest := HandleRequest;
     // FServer.Active := True blocks in the accept loop — run it in a
     // dedicated listener thread so USDX's main thread can enter MainLoop.
+    // Note: FPC 3.2.2's TFPHTTPServer does not surface Address/ConnectionTimeout
+    // as public properties (despite the base class having setters), so the
+    // listener is always bound to all interfaces with no per-conn timeout.
+    // OS-level firewalling is the recommended mitigation for roaming Decks.
     FListener := TSoundStageListener.Create(FServer);
     FEnabled := True;
-    if Ini.SoundStageBindAddress = '' then
-      Log.LogStatus(Format('SoundStage HTTP API listening on port %d (all interfaces)', [FPort]), 'SoundStage')
-    else
-      Log.LogStatus(Format('SoundStage HTTP API listening on %s:%d', [Ini.SoundStageBindAddress, FPort]), 'SoundStage');
+    Log.LogStatus(Format('SoundStage HTTP API listening on port %d (all interfaces)', [FPort]), 'SoundStage');
   except
     on E: Exception do
     begin
