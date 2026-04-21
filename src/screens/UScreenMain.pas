@@ -79,10 +79,21 @@ uses
   ULog,
   UNote,
   UParty,
+  UScreenNextUp,
   USkins,
   USongs,
+  USoundStageAPI,
   UTexture,
   UUnicodeUtils;
+
+// Returns true if a Sing-button press should be diverted to the SoundStage
+// handoff screen (queue has a staged song). Ensures ScreenNextUp exists.
+function TrySingFromQueue: boolean;
+begin
+  Result := QueuedSong.Active;
+  if Result and not Assigned(ScreenNextUp) then
+    ScreenNextUp := TScreenNextUp.Create;
+end;
 
 function TScreenMain.ParseInput(PressedKey: Cardinal; CharCode: UCS4Char;
   PressedDown: boolean): boolean;
@@ -94,7 +105,10 @@ begin
         // check normal keys
     case PressedKey of
       SDLK_S: begin
-        FadeTo(@ScreenName, SoundLib.Start);
+        if TrySingFromQueue then
+          FadeTo(@ScreenNextUp, SoundLib.Start)
+        else
+          FadeTo(@ScreenName, SoundLib.Start);
         Exit;
       end;
 
@@ -170,7 +184,9 @@ begin
         //Solo
         if (Interaction = 0) then
         begin
-          if (Songs.SongList.Count >= 1) then
+          if TrySingFromQueue then
+            FadeTo(@ScreenNextUp, SoundLib.Start)
+          else if (Songs.SongList.Count >= 1) then
           begin
             if (Ini.Players >= 0) and (Ini.Players <= 3) then
               PlayersPlay := Ini.Players + 1;
