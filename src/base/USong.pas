@@ -183,6 +183,7 @@ type
     Medley:     TMedley;  // medley params
 
     isDuet: boolean;
+    ID: UTF8String; // md5(artist NUL title NUL duetFlag), first 16 hex chars; stable content-addressed identifier used by the SoundStage API
     DuetNames:  array of UTF8String; // duet singers name
 
     hasRap: boolean;
@@ -1836,6 +1837,7 @@ begin
   Medley.Source := msNone;
 
   isDuet := false;
+  ID := '';
 
   SetLength(DuetNames, 2);
   DuetNames[0] := 'P1';
@@ -1848,6 +1850,7 @@ function TSong.Analyse(const ReadCustomTags: Boolean; DuetChange: boolean; RapTo
 var
   SongFile: TTextFileStream;
   FileNamePath: IPath;
+  DuetFlag: string;
 begin
   Result := false;
 
@@ -1882,6 +1885,15 @@ begin
         Self.FindRefrain()
       else
         Self.Medley.Source := msNone;
+
+      // isDuet is finalized by LoadOpenedSong (#DUET tag or P1/P2 note
+      // sections), so it's safe to include in the ID hash here.
+      if Self.isDuet then DuetFlag := '1' else DuetFlag := '0';
+      Self.ID := LowerCase(Copy(MD5Print(MD5String(
+        LowerCase(Trim(Self.Artist)) + #0 +
+        LowerCase(Trim(Self.Title))  + #0 +
+        DuetFlag
+      )), 1, 16));
     end;
   except
     Log.LogError('Reading headers from file failed. File incomplete or not Ultrastar txt?: ' + FileNamePath.ToUTF8(true));

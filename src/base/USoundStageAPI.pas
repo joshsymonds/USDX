@@ -34,7 +34,7 @@ type
   // Active = false means the slot is empty — no queue.
   TQueuedSong = record
     Active:    boolean;
-    SongId:    integer;
+    SongId:    UTF8String;  // stable content-hash; 16-hex-char lowercase
     Requester: UTF8String;
     Is2P:      boolean;
     Title:     UTF8String;
@@ -51,7 +51,7 @@ type
     ReplyStatus: integer;
     // cmdQueue payload — parsed from request body on the handler thread,
     // consumed on the main thread by the drain handler.
-    QueueSongId: integer;
+    QueueSongId: UTF8String;  // stable content-hash (16 hex chars)
     QueueRequester: UTF8String;
     QueuePlayers: integer;  // 1 or 2; -1 = omitted (only honored on first /queue of session)
     constructor Create(AKind: TSoundStageCmdKind);
@@ -162,7 +162,7 @@ begin
   // thread ships these defaults — better than an empty 500 body.
   ReplyJSON := '{"error":"timeout"}';
   ReplyStatus := 504;
-  QueueSongId := -1;
+  QueueSongId := '';
   QueueRequester := '';
   QueuePlayers := -1;
 end;
@@ -365,6 +365,8 @@ var
   JSONData: TJSONData;
   Obj: TJSONObject;
   PlayersNode: TJSONData;
+  SongIdNode: TJSONData;
+  SongIdStr: UTF8String;
   PlayersVal: Integer;
   List: TList;
 begin
@@ -408,6 +410,22 @@ begin
           AResponse.Content := '{"error":"legacy fields removed; use requester"}';
           Exit;
         end;
+        // songId must be a non-empty string (stable content hash). Integer
+        // IDs are no longer accepted.
+        SongIdNode := Obj.Find('songId');
+        if (SongIdNode = nil) or (SongIdNode.JSONType <> jtString) then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"songId required (string)"}';
+          Exit;
+        end;
+        SongIdStr := SongIdNode.AsString;
+        if SongIdStr = '' then
+        begin
+          AResponse.Code := 400;
+          AResponse.Content := '{"error":"songId required (string)"}';
+          Exit;
+        end;
         if Obj.Get('requester', '') = '' then
         begin
           AResponse.Code := 400;
@@ -435,7 +453,7 @@ begin
           end;
         end;
         Cmd := TSoundStageCmd.Create(cmdQueue);
-        Cmd.QueueSongId := Obj.Get('songId', -1);
+        Cmd.QueueSongId := SongIdStr;
         Cmd.QueueRequester := Obj.Get('requester', '');
         Cmd.QueuePlayers := PlayersVal;
       finally
@@ -509,18 +527,19 @@ var
 
 function NowPlayingJson: UTF8String;
 var
-  SongId: Integer;
+  SongIdx: Integer;
 begin
   if (Display.CurrentScreen = @ScreenSing) and
      (not AudioPlayback.Finished) and
      (CatSongs.Selected >= 0) and
      (CatSongs.Selected < Length(CatSongs.Song)) then
   begin
-    SongId := CatSongs.Selected;
+    SongIdx := CatSongs.Selected;
     Result := Format(
-      '{"title":%s,"artist":%s,"elapsed":%.3f,"duration":%.3f}',
-      [JsonStr(CatSongs.Song[SongId].Title),
-       JsonStr(CatSongs.Song[SongId].Artist),
+      '{"id":%s,"title":%s,"artist":%s,"elapsed":%.3f,"duration":%.3f}',
+      [JsonStr(CatSongs.Song[SongIdx].ID),
+       JsonStr(CatSongs.Song[SongIdx].Title),
+       JsonStr(CatSongs.Song[SongIdx].Artist),
        AudioPlayback.Position, AudioPlayback.Length],
       JsonFS);
     Exit;
@@ -591,7 +610,7 @@ begin
 
   Result := Result + ',"currentSong":';
   if (CatSongs.Selected >= 0) and (CatSongs.Selected < Length(CatSongs.Song)) then
-    Result := Result + '{"id":' + IntToStr(CatSongs.Selected) +
+    Result := Result + '{"id":' + JsonStr(CatSongs.Song[CatSongs.Selected].ID) +
                        ',"title":' + JsonStr(CatSongs.Song[CatSongs.Selected].Title) +
                        ',"artist":' + JsonStr(CatSongs.Song[CatSongs.Selected].Artist) + '}'
   else
@@ -599,7 +618,7 @@ begin
 
   Result := Result + ',"queuedSong":';
   if QueuedSong.Active then
-    Result := Result + '{"songId":' + IntToStr(QueuedSong.SongId) +
+    Result := Result + '{"songId":' + JsonStr(QueuedSong.SongId) +
                        ',"requester":' + JsonStr(QueuedSong.Requester) +
                        ',"is2P":' + LowerCase(BoolToStr(QueuedSong.Is2P, true)) +
                        ',"title":' + JsonStr(QueuedSong.Title) +
@@ -614,6 +633,7 @@ function SongsJson: UTF8String;
 var
   Sb: TStringBuilder;
   J: Integer;
+  First: Boolean;
 begin
   // Preallocate for a large library — a 2KB initial capacity on the builder
   // avoids the first few growth reallocations. This path was O(N^2) under
@@ -622,15 +642,20 @@ begin
   Sb := TStringBuilder.Create(2048);
   try
     Sb.Append('[');
+    First := True;
     for J := 0 to High(CatSongs.Song) do
     begin
-      if J > 0 then Sb.Append(',');
+      if CatSongs.Song[J].Main then continue;  // skip category headers
+      if not First then Sb.Append(',');
+      First := False;
       Sb.Append('{"id":');
-      Sb.Append(IntToStr(J));
+      AppendJsonStr(Sb, CatSongs.Song[J].ID);
       Sb.Append(',"title":');
       AppendJsonStr(Sb, CatSongs.Song[J].Title);
       Sb.Append(',"artist":');
       AppendJsonStr(Sb, CatSongs.Song[J].Artist);
+      Sb.Append(',"duet":');
+      if CatSongs.Song[J].isDuet then Sb.Append('true') else Sb.Append('false');
       Sb.Append('}');
     end;
     Sb.Append(']');
@@ -644,22 +669,15 @@ end;
 // access to CatSongs/Ini/Display/ScreenSing is safe.
 procedure HandleQueueCommand(Cmd: TSoundStageCmd);
 var
-  SongId: Integer;
+  SongIdx: Integer;
 begin
-  SongId := Cmd.QueueSongId;
-
-  // Resolve songId; if out of range, ask CatSongs to rescan and retry once.
-  if (SongId < 0) or (SongId >= Length(CatSongs.Song)) then
+  // Content-hash lookup. Stable across CatSongs.Refresh, so no retry dance.
+  SongIdx := CatSongs.FindById(Cmd.QueueSongId);
+  if SongIdx = -1 then
   begin
-    Log.LogStatus(Format('Play: songId %d not in CatSongs (len %d), refreshing',
-      [SongId, Length(CatSongs.Song)]), 'SoundStage');
-    CatSongs.Refresh;
-    if (SongId < 0) or (SongId >= Length(CatSongs.Song)) then
-    begin
-      Cmd.ReplyStatus := 404;
-      Cmd.ReplyJSON := '{"error":"song not found"}';
-      Exit;
-    end;
+    Cmd.ReplyStatus := 404;
+    Cmd.ReplyJSON := '{"error":"unknown songId"}';
+    Exit;
   end;
 
   // Reject mid-song — Go owns the queue; mid-ScreenSing /queue is a Go bug.
@@ -681,14 +699,14 @@ begin
   EnsureScreenNextUp;
 
   QueuedSong.Active    := true;
-  QueuedSong.SongId    := SongId;
+  QueuedSong.SongId    := Cmd.QueueSongId;  // store the stable hash, not the index
   QueuedSong.Requester := Cmd.QueueRequester;
   if Display.CurrentScreen = @ScreenScore then
     QueuedSong.Is2P := (Ini.Players = 1)     // session-locked — IPlayersVals[1] = 2
   else
     QueuedSong.Is2P := (Cmd.QueuePlayers = 2);
-  QueuedSong.Title  := CatSongs.Song[SongId].Title;
-  QueuedSong.Artist := CatSongs.Song[SongId].Artist;
+  QueuedSong.Title  := CatSongs.Song[SongIdx].Title;
+  QueuedSong.Artist := CatSongs.Song[SongIdx].Artist;
 
   if Display.CurrentScreen = @ScreenScore then
     Display.FadeTo(@ScreenNextUp);

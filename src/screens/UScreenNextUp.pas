@@ -257,32 +257,28 @@ end;
 procedure TScreenNextUp.StartNow;
 var
   NewPlayersPlay: Integer;
+  SongIdx: Integer;
 begin
   if Applied then Exit;
   Applied := true;
   if not QueuedSong.Active then Exit;
 
-  // Bounds-check the cached SongId in case CatSongs was refreshed (or the
-  // song file deleted) between stage time and now. One retry via
-  // CatSongs.Refresh mirrors HandleQueueCommand's resolve logic — if still
-  // out of range, drop the stale queue and bail to main menu.
-  if (QueuedSong.SongId < 0) or (QueuedSong.SongId >= Length(CatSongs.Song)) then
+  // Resolve the stable content hash to a current array index. If the song
+  // is gone (file removed between stage and pull), drop the queue and bail.
+  SongIdx := CatSongs.FindById(QueuedSong.SongId);
+  if SongIdx = -1 then
   begin
-    CatSongs.Refresh;
-    if (QueuedSong.SongId < 0) or (QueuedSong.SongId >= Length(CatSongs.Song)) then
-    begin
-      Log.LogError(Format('StartNow: queued songId %d out of range (len %d), dropping',
-        [QueuedSong.SongId, Length(CatSongs.Song)]), 'SoundStage');
-      QueuedSong.Active := false;
-      FadeTo(@ScreenMain);
-      Exit;
-    end;
+    Log.LogError(Format('StartNow: queued songId %s not found, dropping',
+      [QueuedSong.SongId]), 'SoundStage');
+    QueuedSong.Active := false;
+    FadeTo(@ScreenMain);
+    Exit;
   end;
 
   // Full pre-Sing ritual — mirrors UScreenName.pas:362-417. Runs regardless
   // of push/pull entry path. For mid-session 2P-stays-2P the Ini writes are
   // effectively no-ops and the recreate is cheap enough that we don't branch.
-  CatSongs.Selected := QueuedSong.SongId;
+  CatSongs.Selected := SongIdx;
   if QueuedSong.Is2P then
   begin
     Ini.Players := 1;        // IPlayersVals[1] = 2

@@ -136,6 +136,7 @@ type
     function VisibleIndex(Index: integer): integer;         // returns visible song index (skips invisible)
 
     function SetFilter(FilterStr: UTF8String; Filter: TSongFilter): cardinal;
+    function FindById(const AId: UTF8String): integer;      // -1 if not found; stable content-hash lookup
   end;
 
 var
@@ -297,11 +298,11 @@ end;
 
 procedure TSongs.BrowseTXTFiles(Dir: IPath);
 var
-  I: integer;
+  I, J: integer;
   Files: TPathDynArray;
-  Song: TSong;
-  //CloneSong: TSong;
+  Song, Existing: TSong;
   Extension: IPath;
+  Collision: boolean;
 begin
   Log.LogDebug('Searching directory ' + Dir.ToWide + ' for txt files', 'TSongs.BrowseTXTFiles');
   SetLength(Files, 0);
@@ -312,13 +313,35 @@ begin
   begin
     Song := TSong.Create(Files[I]);
 
-    if Song.Analyse then
-      SongList.Add(Song)
-    else
+    if not Song.Analyse then
     begin
       Log.LogError('AnalyseFile failed for "' + Files[I].ToNative + '".');
       FreeAndNil(Song);
+      continue;
     end;
+
+    // Content-hash collision: same artist+title+duet as another loaded song.
+    // First-wins — log both paths so the user can disambiguate by editing
+    // metadata on one of the files.
+    Collision := False;
+    for J := 0 to SongList.Count - 1 do
+    begin
+      Existing := TSong(SongList[J]);
+      if (Existing <> nil) and (Existing.ID = Song.ID) then
+      begin
+        Log.LogWarn(Format('Duplicate song ID %s (%s - %s); keeping %s, skipping %s',
+          [Song.ID, Song.Artist, Song.Title,
+           Existing.Path.Append(Existing.FileName).ToNative,
+           Files[I].ToNative]), 'TSongs.BrowseTXTFiles');
+        Collision := True;
+        Break;
+      end;
+    end;
+
+    if Collision then
+      FreeAndNil(Song)
+    else
+      SongList.Add(Song);
   end;
 
   SetLength(Files, 0);
@@ -956,5 +979,21 @@ begin
 end;
 
 // -----------------------------------------------------------------------------
+
+function TCatSongs.FindById(const AId: UTF8String): integer;
+var
+  I: integer;
+begin
+  Result := -1;
+  if AId = '' then Exit;
+  for I := 0 to High(Song) do
+  begin
+    if (Song[I] <> nil) and (not Song[I].Main) and (Song[I].ID = AId) then
+    begin
+      Result := I;
+      Exit;
+    end;
+  end;
+end;
 
 end.
