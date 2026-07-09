@@ -197,12 +197,15 @@ begin
     end;
   end;
 
-  HeaderIdx  := AddText(400,  80, 0, 0, 48, 1,    1,    1,    'Up Next');
-  TitleIdx   := AddText(400, 200, 0, 0, 40, 1,    1,    1,    '');
-  ArtistIdx  := AddText(400, 260, 0, 0, 30, 0.85, 0.85, 0.85, '');
-  Player1Idx := AddText(400, 360, 0, 0, 36, 1,    1,    1,    '');
-  Player2Idx := AddText(400, 410, 0, 0, 36, 1,    1,    1,    '');
-  PromptIdx  := AddText(400, 520, 0, 0, 24, 0.7,  0.7,  0.7,  'Press Enter to start');
+  // Align=1 centers each string on X=400, the middle of the 800-unit render
+  // space. The Align-less AddText overload is left-aligned, which parked all
+  // of this text in the right half of the screen.
+  HeaderIdx  := AddText(400,  80, 0, 0, 0, 0, 48, 1,    1,    1,    1, 'Up Next',              false, 0, 0, false);
+  TitleIdx   := AddText(400, 200, 0, 0, 0, 0, 40, 1,    1,    1,    1, '',                     false, 0, 0, false);
+  ArtistIdx  := AddText(400, 260, 0, 0, 0, 0, 30, 0.85, 0.85, 0.85, 1, '',                     false, 0, 0, false);
+  Player1Idx := AddText(400, 360, 0, 0, 0, 0, 36, 1,    1,    1,    1, '',                     false, 0, 0, false);
+  Player2Idx := AddText(400, 410, 0, 0, 0, 0, 36, 1,    1,    1,    1, '',                     false, 0, 0, false);
+  PromptIdx  := AddText(400, 520, 0, 0, 0, 0, 24, 0.7,  0.7,  0.7,  1, 'Press Enter to start', false, 0, 0, false);
 
   Applied := false;
 end;
