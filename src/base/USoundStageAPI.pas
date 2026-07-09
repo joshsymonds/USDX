@@ -780,7 +780,18 @@ begin
   QueuedSong.Title  := CatSongs.Song[SongIdx].Title;
   QueuedSong.Artist := CatSongs.Song[SongIdx].Artist;
 
-  if Display.CurrentScreen = @ScreenScore then
+  // If ScreenNextUp is already visible or being faded to, this /queue
+  // overwrote the staged song (newest-wins) after OnShow rendered the old
+  // one — re-run OnShow so the visible text matches the slot.
+  if (Display.CurrentScreen = @ScreenNextUp) or
+     (Display.NextScreen = @ScreenNextUp) then
+    ScreenNextUp.OnShow
+  // Push from Score only when no transition is in flight. Overwriting
+  // Display.NextScreen mid-fade would swap the fade target after its OnShow
+  // already ran, presenting ScreenNextUp with stale text and skipping its
+  // music-pause. When we skip, the song stays staged for a Sing-button pull.
+  else if (Display.CurrentScreen = @ScreenScore) and
+          (Display.NextScreen = nil) then
     Display.FadeTo(@ScreenNextUp);
 
   Cmd.ReplyStatus := 200;
