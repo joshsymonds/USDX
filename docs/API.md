@@ -122,11 +122,12 @@ Current song state. Returns `null` unless USDX is actively on ScreenSing with au
   "title": "Take On Me",
   "artist": "a-ha",
   "elapsed": 42.715,
-  "duration": 243.981
+  "duration": 243.981,
+  "singer": "Josh"
 }
 ```
 
-Times are in seconds. `id` is the stable hash. Always HTTP `200`.
+Times are in seconds. `id` is the stable hash. `singer` (string, optional) is Player 1's name — present whenever it's set, including default names like "Player1" for manual carousel plays; carries the SoundStage requester name for queued songs. Omitted when Player 1 has no name set. Always HTTP `200`.
 
 ### `POST /refresh`
 

@@ -614,6 +614,11 @@ begin
        JsonStr(CatSongs.Song[SongIdx].Artist),
        AudioPlayback.Position, AudioPlayback.Length],
       JsonFS);
+    // Player[0].Name carries the SoundStage requester name for queued songs
+    // (see UScreenNextUp.StartNow); omit when unset rather than emit "".
+    if (Length(Player) > 0) and (Player[0].Name <> '') then
+      Result := Copy(Result, 1, Length(Result) - 1) +
+                ',"singer":' + JsonStr(Player[0].Name) + '}';
     Exit;
   end;
   Result := 'null';
