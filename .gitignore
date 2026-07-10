@@ -76,3 +76,6 @@ ppaslink.sh
 .baseline-warnings.txt
 /tmp-build.log
 RESUME.md
+
+# Claude Code worktrees and session state
+.claude/
